@@ -15,7 +15,7 @@ Currently it lacks:
 
 Very basic, probably not production ready except if you're willing like me to have your hands dirty :)
 
-    hardwire --help
+    ./hardwire --help
     hardwire 0.1.0
     Adrien Pestel
 
