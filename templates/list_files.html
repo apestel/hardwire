@@ -1,0 +1,34 @@
+<html class="dark">
+
+<head>
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="{{ hardwire_host }}/s/{{ share_id }}">
+    <meta property="og:title" content="HardWire: {{ first_filename }}">
+    <meta property="og:description" content="HardWire let you share files">
+    <meta property="og:image" content="https://linkfork.co/images/poster.png">
+    <title>HardWire: {{ first_filename }}</title>
+    <link rel="stylesheet" href="/css/output.css">
+</head>
+
+<body>
+
+    <div class="bg-[url('/images/background.jpg')] w-full h-screen bg-cover bg-center">
+        <div class="flex justify-center pt-80">
+            <div class="w-6/12 pt-12 h-80 bg-slate-700 drop-shadow-md rounded-lg">
+                <div class="ml-4 h-24 text-7xl text-neutral-50 dark:text-white ">
+                    <h1>HardWire</h1>
+                </div>
+                <div class="px-6">
+                    {% for file in files %}
+                    <a class="dark:text-white px-6 text-3xl shadow-lg rounded-lg h-14 bg-gradient-to-r from-sky-500 to-indigo-500"
+                        href='{{ hardwire_host }}/s/{{ share_id }}/{{ file.link }}'" type=" button" download='{{
+                        file.short_filename }}'>{{
+                        file.short_filename }}</a>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
