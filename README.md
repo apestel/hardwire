@@ -13,7 +13,7 @@ Currently it lacks:
 - Metadata associated to media files (crawled from TMDB for example)
 - and many more...
 
-Very basic, probably not production ready except if you're willing like to me to have your hands dirty :)
+Very basic, probably not production ready except if you're willing like me to have your hands dirty :)
 
     hardwire --help
     hardwire 0.1.0
