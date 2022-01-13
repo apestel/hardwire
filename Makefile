@@ -21,5 +21,5 @@ build: css
 	cargo build
 
 push:
-	docker build -t pestouille/hardwire:0.0.2 .
-	docker push pestouille/hardwire:0.0.2
+	docker build -t pestouille/hardwire:0.0.3 .
+	docker push pestouille/hardwire:0.0.3
