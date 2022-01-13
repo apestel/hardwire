@@ -23,4 +23,5 @@ COPY --from=cargo-build /hardwire/target/x86_64-unknown-linux-musl/release/hardw
 COPY ./static ./static
 COPY ./dist ./dist
 COPY ./db ./db 
+EXPOSE 8080
 CMD ["./hardwire", "-s"]
