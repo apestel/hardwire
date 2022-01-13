@@ -52,9 +52,15 @@ struct Downloads {
     src_ip_address: String,
 }
 
-async fn init_db() -> Db {
+async fn init_db(data_dir: String) -> Db {
+    let mut p = data_dir.clone();
+    let file_name = "db.sqlite".to_string();
+    p.push_str(&file_name);
+    println!("SQLite Path: {}", p);
+
+    let path = Path::new(&p);
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename("db.sqlite")
+        .filename(path)
         .create_if_missing(true);
 
     // opts.disable_statement_logging();
@@ -226,7 +232,11 @@ fn get_matroska_info(filename: &String) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn publish_file(filename: String, db_pool: &SqlitePool) -> std::io::Result<()> {
+async fn publish_file(
+    filename: String,
+    base_url: String,
+    db_pool: &SqlitePool,
+) -> std::io::Result<()> {
     let mut files_id: Vec<i64> = vec![];
     if Path::new(&filename).exists() {
         let file = File::open(&filename)?;
@@ -281,7 +291,7 @@ async fn publish_file(filename: String, db_pool: &SqlitePool) -> std::io::Result
                         Err(e) => println!("Could not insert files in DB: {}", e),
                     }
                 }
-                println!("Share link: https://<hostname>/s/{}", share_id);
+                println!("Share link: {}/s/{}", base_url, share_id);
             }
             Err(e) => println!("Could not insert share in DB {}", e),
         };
@@ -294,6 +304,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub base_path: String,
     pub host: String,
+    pub data_dir: String,
 }
 
 impl ServerConfig {
@@ -303,12 +314,15 @@ impl ServerConfig {
     const PORT_ENV_VAR: &'static str = "HARDWIRE_PORT";
     const BASE_PATH_ENV_VAR: &'static str = "HARDWIRE_BASE_PATH";
     const HOST_ENV_VAR: &'static str = "HARDWIRE_HOST";
+    const STD_HARDWIRE_DATA_DIR: &'static str = "./";
+    const HARDWIRE_DATA_DIR_ENV_VAR: &'static str = "HARDWIRE_DATA_DIR";
 
     fn new() -> ServerConfig {
         ServerConfig {
             port: Self::port_from_env(),
             base_path: Self::base_path_from_env(),
             host: Self::host_from_env(),
+            data_dir: Self::data_dir_from_env(),
         }
     }
 
@@ -331,6 +345,12 @@ impl ServerConfig {
             .map(|val| val)
             .unwrap_or(ServerConfig::STD_HOST.to_string())
     }
+
+    fn data_dir_from_env() -> String {
+        env::var(ServerConfig::HARDWIRE_DATA_DIR_ENV_VAR)
+            .map(|val| val)
+            .unwrap_or(ServerConfig::STD_HARDWIRE_DATA_DIR.to_string())
+    }
 }
 
 async fn not_found() -> impl Responder {
@@ -342,7 +362,8 @@ async fn main() -> std::io::Result<()> {
     pretty_env_logger::init();
 
     let cli = Cli::parse();
-    let db_pool = init_db().await;
+    let server_config = ServerConfig::new();
+    let db_pool = init_db(server_config.data_dir).await;
 
     if cli.filename.is_none() && !cli.server {
         let mut out = std::io::stdout();
@@ -352,15 +373,13 @@ async fn main() -> std::io::Result<()> {
     }
 
     if cli.filename.is_some() {
-        match publish_file(cli.filename.unwrap(), &db_pool).await {
+        match publish_file(cli.filename.unwrap(), server_config.host, &db_pool).await {
             Ok(_) => println!("Job done!"),
             Err(e) => panic!("Hardwire could not proceed: {}", e),
         }
     }
 
     if cli.server {
-        let server_config = ServerConfig::new();
-
         info!("Sarting server on port {}", server_config.port);
         return HttpServer::new(move || {
             App::new()
