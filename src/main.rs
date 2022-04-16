@@ -54,7 +54,7 @@ struct Downloads {
 
 async fn init_db(data_dir: String) -> Db {
     let mut p = data_dir.clone();
-    let file_name = "db.sqlite".to_string();
+    let file_name = "/db.sqlite".to_string();
     p.push_str(&file_name);
     println!("SQLite Path: {}", p);
 
@@ -180,6 +180,10 @@ async fn list_shared_files(db_pool: web::Data<SqlitePool>, req: HttpRequest) -> 
     //     Ok(row) => ,
     //     Err(e) =>
     // };
+}
+
+async fn healthcheck(pool: web::Data<SqlitePool>, req: HttpRequest) -> impl Responder {
+    HttpResponse::Ok()
 }
 
 async fn download_file(
@@ -314,7 +318,7 @@ impl ServerConfig {
     const PORT_ENV_VAR: &'static str = "HARDWIRE_PORT";
     const BASE_PATH_ENV_VAR: &'static str = "HARDWIRE_BASE_PATH";
     const HOST_ENV_VAR: &'static str = "HARDWIRE_HOST";
-    const STD_HARDWIRE_DATA_DIR: &'static str = "./";
+    const STD_HARDWIRE_DATA_DIR: &'static str = ".";
     const HARDWIRE_DATA_DIR_ENV_VAR: &'static str = "HARDWIRE_DATA_DIR";
 
     fn new() -> ServerConfig {
@@ -389,6 +393,7 @@ async fn main() -> std::io::Result<()> {
                 .service(Files::new("/images", "static/images/"))
                 .route("/s/{share_id}", web::get().to(list_shared_files))
                 .route("/s/{share_id}/{file_id}", web::get().to(download_file))
+                .route("/healthcheck", web::get().to(healthcheck))
         })
         .bind(("0.0.0.0", server_config.port))?
         .run()
