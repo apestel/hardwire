@@ -1,22 +1,31 @@
+use axum::response::{Html, IntoResponse};
+use axum::{
+    body::StreamBody,
+    http::{header, StatusCode},
+};
+
+use tokio_util::io::ReaderStream;
+
 use clap::{IntoApp, Parser};
 use log::{debug, info, warn};
 use nanoid::nanoid;
 use pretty_env_logger;
 use sha2::digest::generic_array::typenum::Len;
-use sqlx::{query, Executor, Pool, SqlitePool};
+use sqlx::{Executor, SqlitePool};
+use tokio::signal;
+use tokio::signal::unix::signal;
 
 use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{self, Seek};
-use std::path::Path;
+use std::net::{Ipv4Addr, SocketAddr};
+//use std::path::Path;
 use std::{env, ffi::OsStr};
 
 use derive_more::{Display, Error};
 
 use matroska::Matroska;
 
-use actix_files::{Files, NamedFile};
-use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use askama::Template;
 
 //use hex_literal::hex;
@@ -25,6 +34,13 @@ use sha2::{Digest, Sha256};
 extern crate chrono;
 
 type Db = sqlx::SqlitePool;
+
+use axum::extract::{Path, State};
+use axum::routing::{get, post};
+// use axum_extra::routing::{
+//     RouterExt, // for `Router::typed_get`
+//     TypedPath,
+// };
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -58,7 +74,7 @@ async fn init_db(data_dir: String) -> Db {
     p.push_str(&file_name);
     println!("SQLite Path: {}", p);
 
-    let path = Path::new(&p);
+    let path = std::path::Path::new(&p);
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true);
@@ -89,8 +105,8 @@ struct ShareLink {
                                // to the `templates` dir in the crate root
 struct T404 {
     // the name of the struct can be anything
-// the field name should match the variable name
-// in your template
+    // the field name should match the variable name
+    // in your template
 }
 
 #[derive(Template)] // this will generate the code...
@@ -106,26 +122,6 @@ struct DownloadFilesTemplate {
     first_filename: String,
 }
 
-#[derive(Debug, Display, Error)]
-enum HardWireError {
-    NotFound,
-}
-
-impl actix_web::error::ResponseError for HardWireError {
-    fn status_code(&self) -> actix_web::http::StatusCode {
-        match *self {
-            HardWireError::NotFound => actix_web::http::StatusCode::NOT_FOUND,
-        }
-    }
-
-    fn error_response(&self) -> HttpResponse<actix_web::body::BoxBody> {
-        let t404 = T404 {};
-        actix_web::HttpResponseBuilder::new(self.status_code())
-            .insert_header(actix_web::http::header::ContentType::html())
-            .body(t404.render().unwrap())
-    }
-}
-
 fn short_filename(filename: String) -> String {
     let s: Vec<&str> = filename.split('/').collect();
     if s.len() > 0 {
@@ -134,11 +130,14 @@ fn short_filename(filename: String) -> String {
     s[0].to_string()
 }
 
-async fn list_shared_files(db_pool: web::Data<SqlitePool>, req: HttpRequest) -> impl Responder {
+async fn list_shared_files(
+    State(db_pool): State<SqlitePool>,
+    Path(share_id): Path<String>,
+) -> impl IntoResponse {
     //let conn = db_pool.get().expect("couldn't get db connection from pool");
 
-    let share_id = req.match_info().get("share_id").unwrap();
-    let real_peer_addr = req.peer_addr().unwrap().ip().to_string();
+    // let share_id = req.match_info().get("share_id").unwrap();
+    // let real_peer_addr = req.peer_addr().unwrap().ip().to_string();
     // let real_peer_addr = req.connection_info().realip_remote_addr().unwrap();
     match sqlx::query_as!(
         ShareLink,
@@ -148,9 +147,8 @@ async fn list_shared_files(db_pool: web::Data<SqlitePool>, req: HttpRequest) -> 
     WHERE share_links.id=$1"#,
         share_id
     )
-    .fetch_all(db_pool.get_ref())
+    .fetch_all(&db_pool)
     .await
-    .map_err(|_e| HardWireError::NotFound)
     {
         Ok(mut rows) => {
             let server = ServerConfig::new();
@@ -167,12 +165,12 @@ async fn list_shared_files(db_pool: web::Data<SqlitePool>, req: HttpRequest) -> 
                     first_filename: first_filename,
                 };
 
-                HttpResponse::Ok().body(t.render().unwrap())
+                (StatusCode::OK, Html(t.render().unwrap()))
             } else {
-                HttpResponse::from_error(HardWireError::NotFound)
+                not_found().await
             }
         }
-        Err(e) => HttpResponse::from_error(e),
+        Err(e) => (StatusCode::BAD_REQUEST, Html("".to_string())),
     }
     //HttpResponse::Ok().body(real_peer_addr)
     // println!("IP address: {}", peer_addr);
@@ -182,41 +180,35 @@ async fn list_shared_files(db_pool: web::Data<SqlitePool>, req: HttpRequest) -> 
     // };
 }
 
-async fn healthcheck(pool: web::Data<SqlitePool>, req: HttpRequest) -> impl Responder {
-    HttpResponse::Ok()
+async fn healthcheck() -> impl IntoResponse {
+    "OK"
 }
 
 async fn download_file(
-    db_pool: web::Data<SqlitePool>,
-    path: web::Path<(String, u32)>,
-    req: HttpRequest,
-) -> Result<NamedFile, HardWireError> {
-    let share_id = &path.0;
-    let file_id = path.1;
-    match sqlx::query!(
+    State(db_pool): State<SqlitePool>,
+    Path((share_id, file_id)): Path<(String, u32)>,
+) -> impl IntoResponse {
+    let file_path = match sqlx::query!(
         r#"SELECT path as file_path 
     FROM files JOIN share_link_files ON share_link_files.file_id=files.id 
     WHERE files.id=$1 AND share_link_files.share_link_id=$2"#,
         file_id,
         share_id
     )
-    .fetch_one(db_pool.as_ref())
+    .fetch_one(&db_pool)
     .await
-    .map_err(|_e| HardWireError::NotFound)
     {
-        Ok(row) => {
-            let path = std::path::PathBuf::from(&row.file_path);
-            log::debug!("File downloaded path: {:#?}", &row);
-            let file = NamedFile::open(path).map_err(|_e| HardWireError::NotFound)?;
-            Ok(file.use_last_modified(true).set_content_disposition(
-                actix_web::http::header::ContentDisposition {
-                    disposition: actix_web::http::header::DispositionType::Attachment,
-                    parameters: vec![],
-                },
-            ))
-        }
-        Err(e) => Err(e),
-    }
+        Ok(row) => row.file_path,
+        Err(_) => return Err(not_found().await),
+    };
+
+    let file = match tokio::fs::File::open(file_path).await {
+        Ok(file) => file,
+        Err(_) => return Err(not_found().await),
+    };
+    let stream = ReaderStream::new(file);
+    let body = StreamBody::new(stream);
+    Ok(body)
 }
 
 fn get_matroska_info(filename: &String) -> std::io::Result<()> {
@@ -242,7 +234,7 @@ async fn publish_file(
     db_pool: &SqlitePool,
 ) -> std::io::Result<()> {
     let mut files_id: Vec<i64> = vec![];
-    if Path::new(&filename).exists() {
+    if std::path::Path::new(&filename).exists() {
         let file = File::open(&filename)?;
         // let mut sha256 = Sha256::new();
         // println!("Compute SHA256 for file: {}", &filename);
@@ -250,7 +242,7 @@ async fn publish_file(
         // let hash = sha256.finalize();
         // println!("File: {} sha256: 0x{:x}", &filename, hash);
         // file.rewind()?;
-        if Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
+        if std::path::Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
             get_matroska_info(&filename)?;
         }
         let file_size = i64::try_from(file.metadata().unwrap().len()).unwrap();
@@ -357,11 +349,12 @@ impl ServerConfig {
     }
 }
 
-async fn not_found() -> impl Responder {
-    HttpResponse::from_error(HardWireError::NotFound)
+async fn not_found() -> (StatusCode, Html<String>) {
+    let t = T404 {};
+    (StatusCode::NOT_FOUND, Html(t.render().unwrap()))
 }
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> std::io::Result<()> {
     pretty_env_logger::init();
 
@@ -385,19 +378,38 @@ async fn main() -> std::io::Result<()> {
 
     if cli.server {
         info!("Sarting server on port {}", server_config.port);
-        return HttpServer::new(move || {
-            App::new()
-                .app_data(web::Data::new(db_pool.clone()))
-                .default_service(web::route().to(not_found))
-                .service(Files::new("/css", "dist/"))
-                .service(Files::new("/images", "static/images/"))
-                .route("/s/{share_id}", web::get().to(list_shared_files))
-                .route("/s/{share_id}/{file_id}", web::get().to(download_file))
-                .route("/healthcheck", web::get().to(healthcheck))
-        })
-        .bind(("0.0.0.0", server_config.port))?
-        .run()
-        .await;
+        //axum::Router::new().nest()
+
+        let app: _ = axum::Router::with_state(db_pool)
+            .route("/s/:share_id", get(list_shared_files))
+            .route("/s/:share_id/:file_id", get(download_file))
+            .route("/healthcheck", get(healthcheck))
+            .merge(axum_extra::routing::SpaRouter::new("/assets", "dist/"));
+
+        //  let app = app.fallback(not_found);
+
+        let addr = SocketAddr::new(
+            std::net::IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            server_config.port,
+        );
+        axum::Server::bind(&addr)
+            .serve(app.into_make_service())
+            //  .with_graceful_shutdown(shutdown_signal)
+            .await;
+
+        //     App::new()
+        //         .wrap(Logger::default())
+        //         .app_data(web::Data::new(db_pool.clone()))
+        //         .service(Files::new("/css", "dist/"))
+        //         .service(Files::new("/images", "static/images/"))
+        //         .route("/s/{share_id}", web::get().to(list_shared_files))
+        //         .route("/s/{share_id}/{file_id}", web::get().to(download_file))
+        //         .route("/healthcheck", web::get().to(healthcheck))
+        //         .default_service(web::route().to(not_found))
+        // })
+        // .bind(("0.0.0.0", server_config.port))?
+        // .run()
+        // .await;
     }
     Ok(())
 }

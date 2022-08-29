@@ -5,7 +5,7 @@ clean:
 	rm dist/output.css
 
 css:
-	npx tailwindcss -i ./static/css/input.css -o ./dist/output.css
+	npx tailwindcss -i ./static/css/input.css -o ./dist/css/output.css
 
 sqlx-setup:
 	cargo install sqlx-cli
@@ -21,5 +21,5 @@ build: css
 	cargo build
 
 push:
-	docker build -t pestouille/hardwire:0.0.3 .
-	docker push pestouille/hardwire:0.0.3
+	docker build -t pestouille/hardwire:0.0.5 .
+	docker push pestouille/hardwire:0.0.5
