@@ -33,3 +33,6 @@ Very basic, probably not production ready except if you're willing like me to ha
 |----------------------|-----------------------|----------------------------------------|
 | HARDWIRE_HOST        | http://localhost:8080 | Base URI used to generate shared links |
 | HARDWIRE_PORT        | 8080                  | Server listen port                     |
+| OTEL_EXPORTER_OTLP_TRACES_PROTOCOL | http/protobuf | OpenTelemetry Traces Protocol |
+| OTEL_EXPORTER_OTLP_TRACES_ENDPOINT | OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318 (protobuf) or http://localhost:4317 | Opentelemetry exporter endpoint |
+| OTEL_RESOURCE_ATTRIBUTES | No default value | service.name=rust-app (you can name it whatever you want) |

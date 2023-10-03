@@ -17,9 +17,13 @@ CREATE TABLE files (
     path TEXT NOT NULL
 );
 
-CREATE TABLE downloads (
+CREATE TABLE download (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path TEXT,
     ip_address TEXT,
-    file_id INT,
-    downloaded_at INT
+    transaction_id TEXT,
+    status TEXT,
+    file_size INT,
+    started_at INT,
+    finished_at INT
 );
