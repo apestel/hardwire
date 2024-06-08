@@ -1,65 +1,110 @@
-use std::time::SystemTime;
-
-use chrono::{DateTime, Utc};
-use indextree::Arena;
+use chrono::Utc;
 use serde::Serialize;
-use sqlx::Sqlite;
-use walkdir::WalkDir;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
-#[derive(Serialize)]
-pub struct FileNode {
-    is_directory: bool,
+#[derive(Serialize, Debug, Clone)]
+pub struct FileInfo {
     name: String,
-    created_at: i64,
-    modified_at: i64,
+    full_path: String,
+    is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<FileInfo>>,
 }
 
-pub struct Indexer {
-    base_path: String,
-    db_pool: sqlx::Pool<Sqlite>,
-    file_tree: Arena<FileNode>,
+#[derive(Clone, Debug)]
+pub struct FileIndexer {
+    pub files: Arc<Mutex<Option<Vec<FileInfo>>>>,
+    pub signal_index_updater: Sender<()>,
 }
 
-impl Indexer {
-    pub fn new(base_path: String, db_pool: sqlx::Pool<Sqlite>) -> Self {
-        Self {
-            base_path,
-            db_pool,
-            file_tree: Arena::new(),
-        }
-    }
+impl FileIndexer {
+    pub fn new(base_path: &Path, update_interval: u64) -> FileIndexer {
+        let (tx, rx) = mpsc::channel();
+        let rescan_tx = tx.clone();
+        let base_path: Arc<PathBuf> = Arc::new(base_path.to_path_buf());
 
-    pub fn index(mut self) {
-        for entry in WalkDir::new(self.base_path)
-            .min_depth(1)
-            .max_depth(2)
-            .into_iter()
-            .flatten()
-        {
-            if let Ok(metadata) = entry.metadata() {
-                let modified_at = metadata
-                    .modified()
-                    .unwrap()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap();
-                // Create DateTime from SystemTime
-                let datetime = DateTime::<Utc>::from(metadata.modified().unwrap());
-                // Formats the combined date and time with the specified format string.
-                let timestamp_str = datetime.format("%Y-%m-%d %H:%M:%S.%f").to_string();
-                println! {"{}",timestamp_str};
-                println!(
-                    "File: {}, modified_at: {}",
-                    entry.file_name().to_str().unwrap(),
-                    timestamp_str
-                );
-                let file_node = FileNode {
-                    is_directory: metadata.is_dir(),
-                    name: entry.file_name().to_str().unwrap().to_owned(),
-                    created_at: datetime.timestamp(),
-                    modified_at: datetime.timestamp(),
-                };
-                self.file_tree.new_node(file_node);
+        let files: Arc<Mutex<Option<Vec<FileInfo>>>> = Arc::new(Mutex::new(Some(vec![])));
+        // Spawn a thread to run the scan periodically
+        let files_clone = Arc::clone(&files);
+        let base_path_clone = Arc::clone(&base_path);
+
+        thread::spawn(move || {
+            loop {
+                match rec_scan_dir(&base_path_clone, &base_path_clone) {
+                    Ok(dir_structure) => {
+                        let mut output = files_clone.lock().unwrap();
+                        *output = Some(dir_structure);
+                    }
+                    Err(e) => eprintln!("Error scanning directory: {}", e),
+                }
+
+                // Wait for either a minute or a manual rescan signal
+                let res = rx.recv_timeout(Duration::from_secs(update_interval));
+                if res.is_ok() {
+                    println!("Manual rescan signal received at {}", Utc::now());
+                }
             }
+        });
+
+        FileIndexer {
+            files,
+            signal_index_updater: rescan_tx.clone(),
         }
     }
+}
+
+fn rec_scan_dir(base_path: &Path, path: &Path) -> io::Result<Vec<FileInfo>> {
+    let mut files_info = Vec::new();
+
+    if path.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            let metadata = fs::metadata(&path)?;
+            let size = if path.is_file() {
+                Some(metadata.len())
+            } else {
+                None
+            };
+
+            let name = path
+                .file_name()
+                .unwrap_or_else(|| path.as_os_str())
+                .to_string_lossy()
+                .into_owned();
+
+            let full_path = path
+                .strip_prefix(base_path)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+
+            let children = if path.is_dir() {
+                Some(rec_scan_dir(base_path, &path)?)
+            } else {
+                None
+            };
+
+            files_info.push(FileInfo {
+                name,
+                full_path,
+                is_dir: path.is_dir(),
+                size,
+                children,
+            });
+        }
+    }
+
+    Ok(files_info)
 }

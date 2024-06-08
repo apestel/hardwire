@@ -12,38 +12,43 @@ askama = "0.12.0"
 nanoid = "0.4.0"
 log = "0.4.14"
 pretty_env_logger = "0.5.0"
+console-subscriber = "0.2.0"
 
 
-clap = { version = "4.0.27", features = ["derive"] }
-tokio = { version = "1.0", features = ["full"] }
-tokio-util = "0.7.3"
-tower-http = { version = "0.4.3", features = ["fs", "trace"] }
-axum = { version = "0.6.20", features = ["ws", "tokio"] }
-axum-extra = "0.7.7"
-axum-tracing-opentelemetry = { version = "0.13.1" }
-opentelemetry = { version = "0.20.0", features = ["rt-tokio"] }
+clap = { version = "4.5.6", features = ["derive"] }
+tokio = { version = "1.38.0", features = ["full", "tracing"] }
+tokio-util = "0.7.10"
+tower-http = { version = "0.5.2", features = ["full"] }
+axum = { version = "0.7.5", features = ["ws", "tokio"] }
+axum-extra = "0.9.3"
+axum-tracing-opentelemetry = { version = "0.18.1" }
+url = "2.5.0"
+http = "1.1.0"
+
+opentelemetry = { version = "0.23.0" }
 # opentelemetry-otlp = { version = "0.12.0", features = ["reqwest-client"] }
-opentelemetry-otlp = { version = "0.13.0", features = [
+opentelemetry-otlp = { version = "0.16.0", features = [
   "reqwest-client",
   "grpc-tonic",
+  "http-proto",
 ] }
 
 tracing = "0.1.37"
-tracing-opentelemetry = "0.21.0"
+tracing-opentelemetry = "0.24.0"
 tracing-subscriber = { version = "0.3.17", features = [
   "env-filter",
   "fmt",
   "json",
 ] }
 
-init-tracing-opentelemetry = { version = "0.13.1", features = [
+init-tracing-opentelemetry = { version = "0.18.1", features = [
   "tracer",
   "otlp",
   "tracing_subscriber_ext",
   "jaeger",
 ] }
 
-tracing-opentelemetry-instrumentation-sdk = "0.13.1"
+tracing-opentelemetry-instrumentation-sdk = "0.18.1"
 
 sha2 = "0.10.7"
 matroska = "0.26.0"

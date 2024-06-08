@@ -1,4 +1,3 @@
-use axum::extract::ws::WebSocket;
 //use crossbeam::channel::{self, Sender};
 use sqlx::{Pool, Sqlite};
 use std::collections::HashMap;
@@ -8,8 +7,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::broadcast;
 
-use serde::{Deserialize, Serialize};
-use serde_json::Result;
+use serde::Serialize;
 
 pub struct ProgressReader<R> {
     inner: R,
@@ -47,9 +45,9 @@ impl<R> ProgressReader<R> {
         }
     }
 
-    pub fn progress(&self) -> f64 {
-        (self.read_bytes as f64 / self.total_bytes as f64) * 100.0
-    }
+    // pub fn progress(&self) -> f64 {
+    //     (self.read_bytes as f64 / self.total_bytes as f64) * 100.0
+    // }
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
@@ -75,7 +73,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
 }
 #[derive(Debug, Clone, Copy)]
 pub enum DownloadStatus {
-    InProgress,
     Complete,
 }
 
@@ -83,7 +80,6 @@ impl DownloadStatus {
     pub fn to_str(self) -> String {
         match self {
             DownloadStatus::Complete => "complete".to_owned(),
-            DownloadStatus::InProgress => "in_progress".to_owned(),
         }
     }
 }
@@ -140,12 +136,10 @@ impl Manager {
     }
 
     async fn update_download_progress(&mut self, pm: FileDownload) {
-        let mut download_status = DownloadStatus::InProgress;
         let transaction_id = pm.clone().transaction_id.clone();
 
         if pm.total_bytes == pm.read_bytes as u32 {
-            download_status = DownloadStatus::Complete;
-            let download_status_str = download_status.to_str();
+            let download_status_str = DownloadStatus::Complete.to_str();
             sqlx::query!(
                 "INSERT INTO download (file_path, transaction_id, status, file_size) VALUES ($1, $2, $3, $4)",
                 pm.file_path,

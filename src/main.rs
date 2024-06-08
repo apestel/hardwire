@@ -1,50 +1,51 @@
 use axum::extract::ws::WebSocket;
-use axum::http::header::CONTENT_LENGTH;
+
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::Json;
-use axum::{body::StreamBody, http::StatusCode};
+
+use url::Url;
 
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
-// use qbittorrent::data::TorrentInfo;
+use file_indexer::FileInfo;
+use http::request::Parts as RequestParts;
+
 // use qbittorrent::{data::Torrent, traits::TorrentData, Api};
 use tokio::sync::broadcast;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tower_http::services::ServeDir;
 use tracing::instrument;
-use walkdir::{DirEntry, WalkDir};
 
 use clap::{CommandFactory, Parser};
-use log::{debug, error, info, warn};
+use log::info;
 
 use sqlx::{Pool, Sqlite, SqlitePool};
 
-use std::collections::BTreeMap;
-use std::convert::TryFrom;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use std::fs::File;
 
-use std::net::{Ipv4Addr, SocketAddr};
-use std::ops::Add;
-use std::thread;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::{env, ffi::OsStr};
 
 use matroska::Matroska;
 
 use askama::Template;
+use axum::body::Body;
 
 extern crate chrono;
 
 type Db = sqlx::SqlitePool;
 
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
-use axum::routing::{delete, get, post};
+use axum::routing::get;
 
 mod file_indexer;
 mod progress;
 use progress::ProgressReader;
 use tracing_opentelemetry_instrumentation_sdk::find_current_trace_id;
-
-use crate::progress::{Event, FileDownload};
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -53,9 +54,9 @@ struct Cli {
     #[arg(short, long)]
     server: bool,
 
-    /// Filename to publish
-    #[arg(short, long)]
-    filename: Option<String>,
+    /// Files to publish
+    #[arg(short, long, num_args=1..=10, value_delimiter = ' ', value_names = ["LIST OF FILES"])]
+    files: Vec<String>,
 }
 
 /// App holds the state of the application
@@ -64,111 +65,51 @@ struct App {
     //file_list: Vec<(String, Option<Torrent>)>,
     db_pool: Pool<Sqlite>,
     progress_channel_sender: broadcast::Sender<progress::Event>,
+    indexer: file_indexer::FileIndexer,
 }
 
 impl App {
     fn new(
         pool: Pool<Sqlite>,
         progress_channel_sender: broadcast::Sender<progress::Event>,
+        indexer: file_indexer::FileIndexer,
     ) -> Self {
         App {
             //  file_list: Vec::new(),
             db_pool: pool,
             progress_channel_sender,
+            indexer,
         }
     }
 }
 
-struct DownloadLink {
-    id: String,
-    filename: String,
-    file_sha256: String,
-    expiration: i64,
-    created_at: i64,
-}
+// struct DownloadLink {
+//     id: String,
+//     filename: String,
+//     file_sha256: String,
+//     expiration: i64,
+//     created_at: i64,
+// }
 
-struct Downloads {
-    file_sha256: String,
-    download_count: u32,
-    src_ip_address: String,
-}
+// struct Downloads {
+//     file_sha256: String,
+//     download_count: u32,
+//     src_ip_address: String,
+// }
 
-struct TorrentInfoSimple {
-    name: String,
-    size: u64,
-}
+// struct TorrentInfoSimple {
+//     name: String,
+//     size: u64,
+// }
 
-fn is_not_hidden(entry: &DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| entry.depth() == 0 || !s.starts_with("."))
-        .unwrap_or(false)
-}
+impl App {}
 
-impl App {
-    // async fn update_torrent_list(&mut self) {
-    //     let api = Api::new("login", "mypassword", "https://torrent.url.me:443")
-    //         .await
-    //         .unwrap();
-    //     info!("[qbitorrent] Downloading Torrent list...");
-    //     let torrents = api.get_torrent_list().await.unwrap();
-    //     let mut map_filename_torrents: BTreeMap<String, Option<Torrent>> = BTreeMap::new();
-    //     //let mut app = App::default();
-    //     //let mut map_from_torrents: HashMap<String, Option<&Torrent>> = HashMap::new();
-    //     let mut i = 0;
+async fn init_db(data_dir: PathBuf) -> Db {
+    let mut sqlite_path = data_dir.clone();
+    sqlite_path.push("db.sqlite");
 
-    //     for t in torrents {
-    //         if let Ok(c) = t.contents(&api).await {
-    //             for e in c {
-    //                 map_filename_torrents.insert(e.name().clone(), Some(t.clone()));
-    //             }
-    //         }
-    //         i = i.add(1);
-    //         //        dbg!(t.name());
-    //         //        dbg!(t.tracker());
-    //         //        let torrent_info = t.contents(&api).await.unwrap();
-
-    //         //       println!("Torrent ration : {}", t.ratio());
-    //         //       println!("Torrent state: #{:?}", t.state());
-    //     }
-    //     //dbg!(torrents);
-
-    //     WalkDir::new(".")
-    //         .into_iter()
-    //         .filter_entry(|e| is_not_hidden(e))
-    //         .filter_map(|v| v.ok())
-    //         .for_each(|x| {
-    //             let p = x.path().display().to_string();
-    //             if p.len() > 2 {
-    //                 // suppress the ./ from the beginning Path
-    //                 let p = &p[2..p.len()];
-    //                 match map_filename_torrents.get(p) {
-    //                     Some(_) => (),
-    //                     None => {
-    //                         map_filename_torrents.insert(p.to_string(), None);
-    //                     }
-    //                 }
-    //             }
-    //         });
-
-    //     self.file_list = map_filename_torrents
-    //         .iter()
-    //         .map(|(x, y)| (x.clone(), y.clone()))
-    //         .collect();
-    //     info!("[qbitorrent] Torrent list downloaded [OK]");
-    // }
-}
-
-async fn init_db(data_dir: String) -> Db {
-    let mut p = data_dir.clone();
-    let file_name = "/db.sqlite".to_string();
-    p.push_str(&file_name);
-    println!("SQLite Path: {}", p);
-
-    let path = std::path::Path::new(&p);
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(path)
+        .filename(sqlite_path)
         .create_if_missing(true);
 
     // opts.disable_statement_logging();
@@ -245,7 +186,7 @@ async fn list_shared_files(
         Ok(mut rows) => {
             let server = ServerConfig::new();
             if !rows.is_empty() {
-                for mut r in rows.iter_mut() {
+                for r in rows.iter_mut() {
                     r.short_filename = short_filename(r.filename.clone());
                 }
                 let first_filename: String = rows.first().unwrap().short_filename.clone();
@@ -262,7 +203,7 @@ async fn list_shared_files(
                 not_found().await
             }
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Html("".to_string())),
+        Err(_) => (StatusCode::BAD_REQUEST, Html("".to_string())),
     }
     //HttpResponse::Ok().body(real_peer_addr)
     // println!("IP address: {}", peer_addr);
@@ -309,17 +250,19 @@ async fn download_file(
         file_path,
         app_state.progress_channel_sender,
     );
-    let stream = FramedRead::new(progress_reader, BytesCodec::new());
-    let body = StreamBody::new(stream);
+    let frame_reader = FramedRead::new(progress_reader, BytesCodec::new());
+    // let body_stream = http_body_util::BodyStream::new(frame_reader);
+    let body = Body::from_stream(frame_reader);
 
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(CONTENT_LENGTH, file_size.to_string().parse().unwrap());
-
     Ok((headers, body))
+
+    //Ok((headers, body))
 }
 
 fn get_matroska_info(filename: &String) -> std::io::Result<()> {
-    let file = File::open(&filename)?;
+    let file = File::open(filename)?;
     let matroska = Matroska::open(file).unwrap();
     let mut i = 0;
     for t in matroska.video_tracks() {
@@ -335,41 +278,44 @@ fn get_matroska_info(filename: &String) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn publish_file(
-    filename: String,
-    base_url: String,
+#[instrument(skip(app_state))]
+async fn list_files(State(app_state): State<App>) -> Json<Option<Vec<FileInfo>>> {
+    let files = app_state.indexer.files.lock().unwrap().clone();
+    Json(files)
+
+    // json!(*app_state.indexer.files.lock().unwrap());
+}
+
+async fn publish_files(
+    files: Vec<String>,
+    base_url: &String,
     db_pool: &SqlitePool,
 ) -> std::io::Result<()> {
     let mut files_id: Vec<i64> = vec![];
-    if std::path::Path::new(&filename).exists() {
-        let file = File::open(&filename)?;
-        // let mut sha256 = Sha256::new();
-        // println!("Compute SHA256 for file: {}", &filename);
-        // io::copy(&mut file, &mut sha256)?;
-        // let hash = sha256.finalize();
-        // println!("File: {} sha256: 0x{:x}", &filename, hash);
-        // file.rewind()?;
-        if std::path::Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
-            get_matroska_info(&filename)?;
+    for filename in files {
+        if std::path::Path::new(&filename).exists() {
+            let file = File::open(&filename)?;
+            if std::path::Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
+                get_matroska_info(&filename)?;
+            }
+            let file_size = i64::try_from(file.metadata().unwrap().len()).unwrap();
+            // FIXME: Should implement a SQL Transaction with BEGIN/ROLLBACK in case of error
+            match sqlx::query!(
+                "INSERT INTO files (sha256, path, file_size) VALUES ($1, $2, $3)",
+                "",
+                filename,
+                file_size
+            )
+            .execute(db_pool)
+            .await
+            {
+                Ok(row) => files_id.push(row.last_insert_rowid()),
+                Err(e) => println!("Could not insert {} in DB: {}", &filename, e),
+            };
         }
-        let file_size = i64::try_from(file.metadata().unwrap().len()).unwrap();
-        // FIXME: Should implement a SQL Transaction with BEGIN/ROLLBACK in case of error
-        match sqlx::query!(
-            "INSERT INTO files (sha256, path, file_size) VALUES ($1, $2, $3)",
-            "",
-            filename,
-            file_size
-        )
-        .execute(db_pool)
-        .await
-        {
-            Ok(row) => files_id.push(row.last_insert_rowid()),
-            Err(e) => println!("Could not insert {} in DB: {}", &filename, e),
-        };
     }
     if !files_id.is_empty() {
         let share_id = nanoid::nanoid!(10);
-        println!("Share ID: {}", &share_id);
         let now = chrono::offset::Utc::now().timestamp();
         match sqlx::query!(
             "INSERT INTO share_links (id, expiration, created_at) VALUES ($1, $2, $3)",
@@ -407,13 +353,13 @@ pub struct ServerConfig {
     pub port: u16,
     pub base_path: String,
     pub host: String,
-    pub data_dir: String,
+    pub data_dir: PathBuf,
 }
 
 impl ServerConfig {
-    const STD_PORT: u16 = 8080;
-    const STD_BASE_PATH: &'static str = "/share";
-    const STD_HOST: &'static str = "http://localhost:8080";
+    const STD_PORT: u16 = 8090;
+    const STD_BASE_PATH: &'static str = ".";
+    const STD_HOST: &'static str = "http://localhost:8090";
     const PORT_ENV_VAR: &'static str = "HARDWIRE_PORT";
     const BASE_PATH_ENV_VAR: &'static str = "HARDWIRE_BASE_PATH";
     const HOST_ENV_VAR: &'static str = "HARDWIRE_HOST";
@@ -438,21 +384,18 @@ impl ServerConfig {
     }
 
     fn base_path_from_env() -> String {
-        env::var(ServerConfig::BASE_PATH_ENV_VAR)
-            .map(|val| val)
-            .unwrap_or(ServerConfig::STD_BASE_PATH.to_string())
+        env::var(ServerConfig::BASE_PATH_ENV_VAR).unwrap_or(ServerConfig::STD_BASE_PATH.to_string())
     }
 
     fn host_from_env() -> String {
-        env::var(ServerConfig::HOST_ENV_VAR)
-            .map(|val| val)
-            .unwrap_or(ServerConfig::STD_HOST.to_string())
+        env::var(ServerConfig::HOST_ENV_VAR).unwrap_or(ServerConfig::STD_HOST.to_string())
     }
 
-    fn data_dir_from_env() -> String {
-        env::var(ServerConfig::HARDWIRE_DATA_DIR_ENV_VAR)
-            .map(|val| val)
-            .unwrap_or(ServerConfig::STD_HARDWIRE_DATA_DIR.to_string())
+    fn data_dir_from_env() -> PathBuf {
+        PathBuf::from(
+            env::var(ServerConfig::HARDWIRE_DATA_DIR_ENV_VAR)
+                .unwrap_or(ServerConfig::STD_HARDWIRE_DATA_DIR.to_string()),
+        )
     }
 }
 
@@ -460,12 +403,6 @@ async fn not_found() -> (StatusCode, Html<String>) {
     let t = T404 {};
     (StatusCode::NOT_FOUND, Html(t.render().unwrap()))
 }
-
-fn merge_files_with_torrent_infos() {}
-
-// async fn list_files(State(app_state): State<App>) -> impl IntoResponse {
-//     Json(app_state.file_list.clone())
-// }
 
 /// The handler for the HTTP request (this gets called when the HTTP GET lands at the start
 /// of websocket negotiation). After this completes, the actual switching from HTTP to
@@ -516,33 +453,27 @@ async fn main() -> std::io::Result<()> {
     let server_config = ServerConfig::new();
     let db_pool = init_db(server_config.data_dir).await;
 
-    if cli.filename.is_none() && !cli.server {
-        let mut out = std::io::stdout();
-        Cli::command().print_long_help();
+    if cli.files.is_empty() && !cli.server {
+        // let out = std::io::stdout();
+        Cli::command().print_long_help()?;
     }
 
-    if cli.filename.is_some() {
-        match publish_file(cli.filename.unwrap(), server_config.host, &db_pool).await {
-            Ok(_) => println!("Job done!"),
-            Err(e) => panic!("Hardwire could not proceed: {}", e),
-        }
+    if !cli.files.is_empty() {
+        publish_files(cli.files, &server_config.host, &db_pool).await?;
     }
 
     if cli.server {
         init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers().unwrap();
         let mut progress_manager = progress::Manager::new(db_pool.clone());
         // let base_path = "/mnt";
-        // file_indexer::Indexer::new(base_path.to_string(), db_pool.clone()).index();
+        let indexer =
+            file_indexer::FileIndexer::new(&PathBuf::from(&server_config.base_path.as_str()), 60);
+
         let progress_channel_sender = progress_manager.sender.clone();
         progress_manager.start_recv_thread().await;
 
-        let app_state = App::new(db_pool, progress_channel_sender);
-        //app_state.update_torrent_list().await;
+        let app_state = App::new(db_pool, progress_channel_sender, indexer);
         info!("Sarting server on port {}", server_config.port);
-        // let api_routes: _ = axum::Router::new()
-        //     .route("/admin/files", get(list_files))
-        //     .with_state(app_state);
-        //axum::Router::new().nest()
 
         let api_routes = axum::Router::new().route("/admin/list_files", get(list_shared_files));
 
@@ -559,20 +490,30 @@ async fn main() -> std::io::Result<()> {
             .nest("/api", api_routes)
             .nest_service("/assets", ServeDir::new("dist/"))
             .route("/admin/live_update", get(ws_handler))
+            .route("/admin/list_files", get(list_files))
             .with_state(app_state)
             // include trace context as header into the response
             .layer(OtelInResponseLayer)
             //start OpenTelemetry trace on incoming request
-            .layer(OtelAxumLayer::default());
+            .layer(OtelAxumLayer::default())
+            .layer(
+                CorsLayer::new()
+                    .allow_origin(AllowOrigin::predicate(
+                        |origin: &HeaderValue, _request_parts: &RequestParts| {
+                            origin.as_bytes().ends_with(b".pestel.me")
+                                || match Url::parse(std::str::from_utf8(origin.as_ref()).unwrap()) {
+                                    Ok(url) => url.host_str().unwrap().eq("localhost"),
+                                    Err(_) => false,
+                                }
+                        },
+                    ))
+                    .allow_headers([AUTHORIZATION, ACCEPT])
+                    .allow_credentials(true),
+            );
 
-        //  let app = app.fallback(not_found);
-
-        let addr = SocketAddr::new(
-            std::net::IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-            server_config.port,
-        );
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        let bind_adress = format!("0.0.0.0:{}", server_config.port);
+        let listener = tokio::net::TcpListener::bind(bind_adress).await.unwrap();
+        axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await
             .unwrap();
