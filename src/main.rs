@@ -291,6 +291,13 @@ async fn create_shared_link(
     State(app_state): State<App>,
     Json(files): Json<Vec<String>>,
 ) -> Json<Option<String>> {
+    // Validate input
+    for file in &files {
+        if file.contains("..") || file.contains("\0") {
+            return Json(None);
+        }
+    }
+
     match publish_files(files, &ServerConfig::new().host, &app_state.db_pool).await {
         Ok(link) => Json(Some(link)),
         Err(_) => Json(None),
