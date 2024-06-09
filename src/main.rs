@@ -26,6 +26,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use std::fs::File;
 
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{env, ffi::OsStr};
@@ -40,7 +41,7 @@ extern crate chrono;
 type Db = sqlx::SqlitePool;
 
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
-use axum::routing::get;
+use axum::routing::{get, post};
 
 mod file_indexer;
 mod progress;
@@ -55,7 +56,7 @@ struct Cli {
     server: bool,
 
     /// Files to publish
-    #[arg(short, long, num_args=1..=10, value_delimiter = ' ', value_names = ["LIST OF FILES"])]
+    #[arg(short, long, num_args=1..=99, value_delimiter = ' ', value_names = ["LIST OF FILES"])]
     files: Vec<String>,
 }
 
@@ -286,18 +287,30 @@ async fn list_files(State(app_state): State<App>) -> Json<Option<Vec<FileInfo>>>
     // json!(*app_state.indexer.files.lock().unwrap());
 }
 
+async fn create_shared_link(
+    State(app_state): State<App>,
+    Json(files): Json<Vec<String>>,
+) -> Json<Option<String>> {
+    match publish_files(files, &ServerConfig::new().host, &app_state.db_pool).await {
+        Ok(link) => Json(Some(link)),
+        Err(_) => Json(None),
+    }
+}
+
 async fn publish_files(
     files: Vec<String>,
     base_url: &String,
     db_pool: &SqlitePool,
-) -> std::io::Result<()> {
+) -> Result<String> {
     let mut files_id: Vec<i64> = vec![];
+    let share_id = nanoid::nanoid!(10);
+
     for filename in files {
         if std::path::Path::new(&filename).exists() {
             let file = File::open(&filename)?;
-            if std::path::Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
-                get_matroska_info(&filename)?;
-            }
+            // if std::path::Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
+            //     get_matroska_info(&filename)?;
+            // }
             let file_size = i64::try_from(file.metadata().unwrap().len()).unwrap();
             // FIXME: Should implement a SQL Transaction with BEGIN/ROLLBACK in case of error
             match sqlx::query!(
@@ -310,12 +323,11 @@ async fn publish_files(
             .await
             {
                 Ok(row) => files_id.push(row.last_insert_rowid()),
-                Err(e) => println!("Could not insert {} in DB: {}", &filename, e),
+                Err(_) => return Err(anyhow::Error::msg("failed to create share link")),
             };
         }
     }
     if !files_id.is_empty() {
-        let share_id = nanoid::nanoid!(10);
         let now = chrono::offset::Utc::now().timestamp();
         match sqlx::query!(
             "INSERT INTO share_links (id, expiration, created_at) VALUES ($1, $2, $3)",
@@ -328,25 +340,23 @@ async fn publish_files(
         {
             Ok(_) => {
                 for id in files_id {
-                    match sqlx::query!(
+                    sqlx::query!(
                         "INSERT INTO share_link_files (share_link_id, file_id) VALUES ($1, $2)",
                         share_id,
                         id
                     )
                     .execute(db_pool)
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(e) => println!("Could not insert files in DB: {}", e),
-                    }
+                    .await?;
                 }
-                println!("Share link: {}/s/{}", base_url, share_id);
+                return Ok(format!("{}/s/{}", base_url, share_id));
             }
-            Err(e) => println!("Could not insert share in DB {}", e),
+            Err(e) => {
+                log::error!("{}", e);
+                return Err(anyhow::Error::msg("failed to create share link"));
+            }
         };
     }
-
-    Ok(())
+    Err(anyhow::Error::msg("failed to create share link"))
 }
 
 pub struct ServerConfig {
@@ -446,7 +456,7 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, app_state: App) {
 }
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<()> {
     pretty_env_logger::init();
 
     let cli = Cli::parse();
@@ -459,7 +469,8 @@ async fn main() -> std::io::Result<()> {
     }
 
     if !cli.files.is_empty() {
-        publish_files(cli.files, &server_config.host, &db_pool).await?;
+        let shared_link = publish_files(cli.files, &server_config.host, &db_pool).await?;
+        println!("Shared link: {}", shared_link);
     }
 
     if cli.server {
@@ -491,6 +502,7 @@ async fn main() -> std::io::Result<()> {
             .nest_service("/assets", ServeDir::new("dist/"))
             .route("/admin/live_update", get(ws_handler))
             .route("/admin/list_files", get(list_files))
+            .route("/admin/create_shared_link", post(create_shared_link))
             .with_state(app_state)
             // include trace context as header into the response
             .layer(OtelInResponseLayer)
