@@ -1,4 +1,4 @@
-all: css build
+all: db-migrate css build
 
 clean:
 	rm -rf target/*
@@ -13,8 +13,10 @@ sqlx-setup:
 	sqlx migrate run --source db/migrations
 
 db-migrate:
+	export DATABASE_URL=sqlite://db/db.sqlite3
+	test -e db/db.sqlite3 || echo "" > db/db.sqlite3
 	sqlx migrate run --source db/migrations
-	cargo sqlx prepare 
+	cargo sqlx prepare
 
 build: css db-migrate
 	cargo build -r
