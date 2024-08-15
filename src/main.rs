@@ -176,8 +176,8 @@ async fn list_shared_files(
     match sqlx::query_as!(
         ShareLink,
         r#"SELECT files.path AS filename, files.id AS link, '' AS short_filename
-    FROM share_links JOIN share_link_files ON share_links.id=share_link_files.share_link_id 
-    JOIN files ON share_link_files.file_id=files.id 
+    FROM share_links JOIN share_link_files ON share_links.id=share_link_files.share_link_id
+    JOIN files ON share_link_files.file_id=files.id
     WHERE share_links.id=$1"#,
         share_id
     )
@@ -224,8 +224,8 @@ async fn download_file(
     Path((share_id, file_id)): Path<(String, u32)>,
 ) -> impl IntoResponse {
     let file_path = match sqlx::query!(
-        r#"SELECT path as file_path 
-    FROM files JOIN share_link_files ON share_link_files.file_id=files.id 
+        r#"SELECT path as file_path
+    FROM files JOIN share_link_files ON share_link_files.file_id=files.id
     WHERE files.id=$1 AND share_link_files.share_link_id=$2"#,
         file_id,
         share_id
@@ -481,7 +481,7 @@ async fn main() -> Result<()> {
     }
 
     if cli.server {
-        init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers().unwrap();
+        init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers()?;
         let mut progress_manager = progress::Manager::new(db_pool.clone());
         // let base_path = "/mnt";
         let indexer =
