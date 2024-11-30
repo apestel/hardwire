@@ -25,22 +25,22 @@ axum-tracing-opentelemetry = { version = "0.19.0" }
 url = "2.5.0"
 http = "1.1.0"
 
-opentelemetry-http = "0.13.0"
-opentelemetry-otlp = { version = "0.17.0", default-features = true }
+# opentelemetry-http = "0.13.0"
+opentelemetry-otlp = { version = "0.27.0", default-features = true }
 
-tracing = "0.1.37"
-tracing-opentelemetry = "0.24.0"
-tracing-subscriber = { version = "0.3.17", features = [
+tracing = "0.1.41"
+tracing-opentelemetry = "0.28.0"
+tracing-subscriber = { version = "0.3.19", features = [
     "env-filter",
     "fmt",
     "json",
 ] }
 
-init-tracing-opentelemetry = { version = "0.19.0", features = [
+init-tracing-opentelemetry = { version = "0.24.1", features = [
     "tracing_subscriber_ext",
 ] }
 
-tracing-opentelemetry-instrumentation-sdk = "0.18.1"
+tracing-opentelemetry-instrumentation-sdk = "0.24.0"
 
 sha2 = "0.10.7"
 matroska = "0.26.0"
@@ -61,4 +61,4 @@ futures = "0.3.28"
 serde_json = "1.0.104"
 serde = "1.0.183"
 indextree = "4.6.0"
-opentelemetry = { version = "0.23.0" }
+opentelemetry = { version = "0.27.1" }
