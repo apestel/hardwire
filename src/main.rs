@@ -54,7 +54,7 @@ struct Cli {
     server: bool,
 
     /// Files to publish
-    #[arg(short, long, num_args=1.., value_delimiter = '\n', value_names = ["LIST OF FILES"])]
+    #[arg(short, long, num_args=1.., value_names = ["LIST OF FILES"])]
     files: Vec<String>,
 }
 
