@@ -2,7 +2,7 @@ use axum::extract::ws::WebSocket;
 
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH};
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 
 use url::Url;
@@ -26,12 +26,10 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use std::fs::File;
 
-use anyhow::Result;
+use anyhow::{anyhow,Result};
+use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::{env, ffi::OsStr};
-
-use matroska::Matroska;
 
 use askama::Template;
 use axum::body::Body;
@@ -41,7 +39,7 @@ extern crate chrono;
 type Db = sqlx::SqlitePool;
 
 use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
-use axum::routing::{get, post};
+use axum::routing::{get, head, post};
 
 mod file_indexer;
 mod progress;
@@ -56,8 +54,33 @@ struct Cli {
     server: bool,
 
     /// Files to publish
-    #[arg(short, long, num_args=1..=99, value_delimiter = ' ', value_names = ["LIST OF FILES"])]
+    #[arg(short, long, num_args=1.., value_delimiter = '\n', value_names = ["LIST OF FILES"])]
     files: Vec<String>,
+}
+
+// Make our own error that wraps `anyhow::Error`.
+struct AppError(anyhow::Error);
+
+// Tell axum how to convert `AppError` into a response.
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", self.0),
+        )
+            .into_response()
+    }
+}
+
+// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+// `Result<_, AppError>`. That way you don't need to do that manually.
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
 }
 
 /// App holds the state of the application
@@ -129,9 +152,9 @@ async fn init_db(data_dir: PathBuf) -> Db {
 
 #[derive(Debug)]
 struct ShareLink {
-    short_filename: String,
     filename: String,
     link: i64,
+    short_filename: String,
 }
 
 #[derive(Template)] // this will generate the code...
@@ -156,66 +179,93 @@ struct DownloadFilesTemplate {
     first_filename: String,
 }
 
-fn short_filename(filename: String) -> String {
-    let s: Vec<&str> = filename.split('/').collect();
-    if !s.is_empty() {
-        return s[s.len() - 1].to_string();
-    }
-    s[0].to_string()
-}
-
 async fn list_shared_files(
     State(app_state): State<App>,
     Path(share_id): Path<String>,
-) -> impl IntoResponse {
-    //let conn = db_pool.get().expect("couldn't get db connection from pool");
+) -> Response {
+    let result = async move {
+        let shared_links: Vec<(String, i64, String)> = sqlx::query_as(
+            r#"SELECT files.path AS "filename!", files.id AS "link!", substr(files.path, instr(files.path, '/') + 1) AS "short_filename!"
+        FROM share_links JOIN share_link_files ON share_links.id=share_link_files.share_link_id
+        JOIN files ON share_link_files.file_id=files.id
+        WHERE share_links.id = ?"#
+        )
+        .bind(share_id.clone())
+        .fetch_all(&app_state.db_pool)
+        .await?;
+        let server = ServerConfig::new();
+        
+        if !shared_links.is_empty() {
+            let t = DownloadFilesTemplate {
+                files: shared_links
+                    .iter()
+                    .map(|r| ShareLink {
+                        filename: r.0.clone(),
+                        link: r.1,
+                        short_filename: r.2.clone(),
+                    })
+                    .collect(),
+                share_id: share_id.to_string(),
+                hardwire_host: server.host,
+                first_filename: shared_links.first().unwrap().2.clone(),
+            };
 
-    // let share_id = req.match_info().get("share_id").unwrap();
-    // let real_peer_addr = req.peer_addr().unwrap().ip().to_string();
-    // let real_peer_addr = req.connection_info().realip_remote_addr().unwrap();
-    match sqlx::query_as!(
-        ShareLink,
-        r#"SELECT files.path AS filename, files.id AS link, '' AS short_filename
-    FROM share_links JOIN share_link_files ON share_links.id=share_link_files.share_link_id
-    JOIN files ON share_link_files.file_id=files.id
-    WHERE share_links.id=$1"#,
-        share_id
-    )
-    .fetch_all(&app_state.db_pool)
-    .await
-    {
-        Ok(mut rows) => {
-            let server = ServerConfig::new();
-            if !rows.is_empty() {
-                for r in rows.iter_mut() {
-                    r.short_filename = short_filename(r.filename.clone());
-                }
-                let first_filename: String = rows.first().unwrap().short_filename.clone();
-
-                let t = DownloadFilesTemplate {
-                    files: rows,
-                    share_id: share_id.to_string(),
-                    hardwire_host: server.host,
-                    first_filename,
-                };
-
-                (StatusCode::OK, Html(t.render().unwrap()))
-            } else {
-                not_found().await
-            }
+            Ok::<_, anyhow::Error>((StatusCode::OK, Html(t.render().unwrap())))
+        } else {
+            Ok::<_, anyhow::Error>(not_found().await)
         }
-        Err(_) => (StatusCode::BAD_REQUEST, Html("".to_string())),
     }
-    //HttpResponse::Ok().body(real_peer_addr)
-    // println!("IP address: {}", peer_addr);
-    // let r = match sqlx::query_as!().await {
-    //     Ok(row) => ,
-    //     Err(e) =>
-    // };
+    .await;
+
+    match result {
+        Ok(response) => response.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Something went wrong: {}", e)).into_response(),
+    }
 }
 
 async fn healthcheck() -> impl IntoResponse {
     "OK"
+}
+
+async fn head_file(
+    State(app_state): State<App>,
+    Path((share_id, file_id)): Path<(String, u32)>,
+) -> impl IntoResponse {
+    let file_path = match sqlx::query!(
+        r#"SELECT path as file_path
+        FROM files JOIN share_link_files ON share_link_files.file_id=files.id
+        WHERE files.id=$1 AND share_link_files.share_link_id=$2"#,
+        file_id,
+        share_id
+    )
+    .fetch_one(&app_state.db_pool)
+    .await
+    {
+        Ok(row) => row.file_path,
+        Err(_) => return Err(not_found().await),
+    };
+
+    let file = match tokio::fs::File::open(file_path.clone()).await {
+        Ok(file) => file,
+        Err(_) => return Err(not_found().await),
+    };
+    let file_size = file.metadata().await.unwrap().len();
+    let transaction_id = find_current_trace_id().unwrap();
+
+    let progress_reader = ProgressReader::new(
+        file,
+        file_size as u32,
+        transaction_id,
+        file_path,
+        app_state.progress_channel_sender,
+    );
+    let frame_reader = FramedRead::new(progress_reader, BytesCodec::new());
+    // let body_stream = http_body_util::BodyStream::new(frame_reader);
+    let body = Body::from_stream(frame_reader);
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, file_size.to_string().parse().unwrap());
+    Ok((headers, body))
 }
 
 #[instrument(skip(app_state))]
@@ -262,23 +312,6 @@ async fn download_file(
     //Ok((headers, body))
 }
 
-fn get_matroska_info(filename: &String) -> std::io::Result<()> {
-    let file = File::open(filename)?;
-    let matroska = Matroska::open(file).unwrap();
-    let mut i = 0;
-    for t in matroska.video_tracks() {
-        i += 1;
-        println!("Video Track N°{}: {:#?}", &i, &t);
-        println!(
-            "Video Track codec: {}",
-            t.codec_name.clone().unwrap_or_default()
-        );
-        // println!("Video Track {}", t.language.unwrap().into());
-    }
-    println!("Title : {:?}", matroska.info.title);
-    Ok(())
-}
-
 #[instrument(skip(app_state))]
 async fn list_files(State(app_state): State<App>) -> Json<Option<Vec<FileInfo>>> {
     let files = app_state.indexer.files.lock().unwrap().clone();
@@ -315,9 +348,6 @@ async fn publish_files(
     for filename in files {
         if std::path::Path::new(&filename).exists() {
             let file = File::open(&filename)?;
-            // if std::path::Path::new(&filename).extension() == Some(OsStr::new("mkv")) {
-            //     get_matroska_info(&filename)?;
-            // }
             let file_size = i64::try_from(file.metadata().unwrap().len()).unwrap();
             // FIXME: Should implement a SQL Transaction with BEGIN/ROLLBACK in case of error
             match sqlx::query!(
@@ -330,7 +360,7 @@ async fn publish_files(
             .await
             {
                 Ok(row) => files_id.push(row.last_insert_rowid()),
-                Err(_) => return Err(anyhow::Error::msg("failed to create share link")),
+                Err(e) => return Err(anyhow!("failed to create share link: {:?}", e)),
             };
         }
     }
@@ -359,7 +389,7 @@ async fn publish_files(
             }
             Err(e) => {
                 log::error!("{}", e);
-                return Err(anyhow::Error::msg("failed to create share link"));
+                return Err(anyhow!("failed to create share link: {:?}", e));
             }
         };
     }
@@ -493,10 +523,11 @@ async fn main() -> Result<()> {
         let app_state = App::new(db_pool, progress_channel_sender, indexer);
         info!("Sarting server on port {}", server_config.port);
 
-        let api_routes = axum::Router::new().route("/admin/list_files", get(list_shared_files));
+        //let api_routes = axum::Router::new().route("/admin/list_files", get(list_shared_files));
 
         let app = axum::Router::new()
             .route("/s/:share_id", get(list_shared_files))
+            .route("/s/:share_id/:file_id", head(head_file))
             .route("/s/:share_id/:file_id", get(download_file))
             //   .route("/admin/files", get(list_files))
             // .route("/admin/download_link", post(download_link_create))
@@ -505,7 +536,7 @@ async fn main() -> Result<()> {
             // .route("/admin/tasks_status", get(tasks_status))
             // .route("/admin/torrents/:id", delete(delete_torrent))
             .route("/healthcheck", get(healthcheck))
-            .nest("/api", api_routes)
+            //  .nest("/api", api_routes)
             .nest_service("/assets", ServeDir::new("dist/"))
             .route("/admin/live_update", get(ws_handler))
             .route("/admin/list_files", get(list_files))
