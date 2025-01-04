@@ -18,13 +18,13 @@ use tower_http::services::ServeDir;
 use tracing::instrument;
 
 use clap::{CommandFactory, Parser};
-use log::info;
 
 use sqlx::{Pool, Sqlite, SqlitePool};
 
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use std::fs::File;
+use std::sync::Arc;
 
 use anyhow::{anyhow,Result};
 use std::env;
@@ -38,13 +38,16 @@ extern crate chrono;
 
 type Db = sqlx::SqlitePool;
 
-use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
 use axum::routing::{get, head, post};
+use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
+
 
 mod file_indexer;
 mod progress;
+mod worker;
 use progress::ProgressReader;
 use tracing_opentelemetry_instrumentation_sdk::find_current_trace_id;
+use worker::{Task, TaskInput, TaskManager, tasks::TaskWorker};
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -86,9 +89,9 @@ where
 /// App holds the state of the application
 #[derive(Clone, Debug)]
 struct App {
-    //file_list: Vec<(String, Option<Torrent>)>,
     db_pool: Pool<Sqlite>,
     progress_channel_sender: broadcast::Sender<progress::Event>,
+    task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
 }
 
@@ -96,35 +99,17 @@ impl App {
     fn new(
         pool: Pool<Sqlite>,
         progress_channel_sender: broadcast::Sender<progress::Event>,
+        task_manager: Arc<TaskManager>,
         indexer: file_indexer::FileIndexer,
     ) -> Self {
         App {
-            //  file_list: Vec::new(),
             db_pool: pool,
             progress_channel_sender,
+            task_manager,
             indexer,
         }
     }
 }
-
-// struct DownloadLink {
-//     id: String,
-//     filename: String,
-//     file_sha256: String,
-//     expiration: i64,
-//     created_at: i64,
-// }
-
-// struct Downloads {
-//     file_sha256: String,
-//     download_count: u32,
-//     src_ip_address: String,
-// }
-
-// struct TorrentInfoSimple {
-//     name: String,
-//     size: u64,
-// }
 
 impl App {}
 
@@ -137,22 +122,15 @@ async fn init_db(data_dir: PathBuf) -> Db {
         .create_if_missing(true);
 
     // opts.disable_statement_logging();
-    let db = match Db::connect_with(opts).await {
+    match Db::connect_with(opts).await {
         Ok(db) => db,
         Err(e) => {
             panic!("Failed to connect to SQLx database: {}", e);
         }
-    };
-
-    if let Err(e) = sqlx::migrate!("db/migrations").run(&db).await {
-        panic!("Failed to initialize SQLx database: {}", e);
-    }
-    db
+    } 
 }
 
-#[derive(Debug)]
 struct ShareLink {
-    filename: String,
     link: i64,
     short_filename: String,
 }
@@ -200,7 +178,6 @@ async fn list_shared_files(
                 files: shared_links
                     .iter()
                     .map(|r| ShareLink {
-                        filename: r.0.clone(),
                         link: r.1,
                         short_filename: r.2.clone(),
                     })
@@ -545,7 +522,7 @@ async fn main() -> Result<()> {
     }
 
     if cli.server {
-        init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers()?;
+        let _ = init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers()?;
         let mut progress_manager = progress::Manager::new(db_pool.clone());
         // let base_path = "/mnt";
         let indexer =
@@ -554,22 +531,25 @@ async fn main() -> Result<()> {
         let progress_channel_sender = progress_manager.sender.clone();
         progress_manager.start_recv_thread().await;
 
-        let app_state = App::new(db_pool, progress_channel_sender, indexer);
-        info!("Sarting server on port {}", server_config.port);
+        // Initialize task manager
+        let (task_manager, task_receiver) = TaskManager::new(db_pool.clone());
+        let task_manager = Arc::new(task_manager);
+        
+        // Start task worker
+        let worker_task_manager = Arc::clone(&task_manager);
+        tokio::spawn(async move {
+            let mut worker = TaskWorker::new((*worker_task_manager).clone(), task_receiver);
+            worker.run().await;
+        });
 
-        //let api_routes = axum::Router::new().route("/admin/list_files", get(list_shared_files));
+        let app_state = App::new(db_pool, progress_channel_sender, task_manager, indexer);
 
         let app = axum::Router::new()
             .route("/s/{share_id}", get(list_shared_files))
             .route("/s/{share_id}/{file_id}", head(head_file).get(download_file))
-            //   .route("/admin/files", get(list_files))
-            // .route("/admin/download_link", post(download_link_create))
-            // .route("/admin/download_link", delete(download_link_delete))
-            // .route("/admin/zip", post(zip_files))
-            // .route("/admin/tasks_status", get(tasks_status))
-            // .route("/admin/torrents/:id", delete(delete_torrent))
+            .route("/admin/tasks", post(create_task))
+            .route("/admin/tasks/{task_id}", get(get_task_status))
             .route("/healthcheck", get(healthcheck))
-            //  .nest("/api", api_routes)
             .nest_service("/assets", ServeDir::new("dist/"))
             .route("/admin/live_update", get(ws_handler))
             .route("/admin/list_files", get(list_files))
@@ -629,4 +609,42 @@ async fn shutdown_signal() {
 
     tracing::warn!("signal received, starting graceful shutdown");
     opentelemetry::global::shutdown_tracer_provider();
+}
+
+async fn create_task(
+    State(app_state): State<App>,
+    Json(input): Json<TaskInput>,
+) -> Result<Json<String>, Response> {
+    let task_id = app_state
+        .task_manager
+        .create_task(input)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create task: {}", e),
+            )
+                .into_response()
+        })?;
+
+    Ok(Json(task_id))
+}
+
+async fn get_task_status(
+    State(app_state): State<App>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Task>, Response> {
+    let task = app_state
+        .task_manager
+        .get_task_status(&task_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get task status: {}", e),
+            )
+                .into_response()
+        })?;
+
+    Ok(Json(task))
 }

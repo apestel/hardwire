@@ -24,7 +24,7 @@ pub struct FileInfo {
 #[derive(Clone, Debug)]
 pub struct FileIndexer {
     pub files: Arc<Mutex<Option<Vec<FileInfo>>>>,
-    pub signal_index_updater: Sender<()>,
+    pub _signal_index_updater: Sender<()>,
 }
 
 impl FileIndexer {
@@ -58,7 +58,7 @@ impl FileIndexer {
 
         FileIndexer {
             files,
-            signal_index_updater: rescan_tx.clone(),
+            _signal_index_updater: rescan_tx.clone(),
         }
     }
 }
