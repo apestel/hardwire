@@ -509,7 +509,7 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, app_state: App) {
                 Ok(msg) => {
                     if let Err(err) = socket
                         .send(axum::extract::ws::Message::Text(
-                            serde_json::json!(msg).to_string(),
+                            serde_json::json!(msg).to_string().into(),
                         ))
                         .await
                     {
@@ -560,9 +560,8 @@ async fn main() -> Result<()> {
         //let api_routes = axum::Router::new().route("/admin/list_files", get(list_shared_files));
 
         let app = axum::Router::new()
-            .route("/s/:share_id", get(list_shared_files))
-            .route("/s/:share_id/:file_id", head(head_file))
-            .route("/s/:share_id/:file_id", get(download_file))
+            .route("/s/{share_id}", get(list_shared_files))
+            .route("/s/{share_id}/{file_id}", head(head_file).get(download_file))
             //   .route("/admin/files", get(list_files))
             // .route("/admin/download_link", post(download_link_create))
             // .route("/admin/download_link", delete(download_link_delete))
