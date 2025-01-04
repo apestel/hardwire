@@ -1,7 +1,7 @@
 use axum::extract::ws::WebSocket;
 
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::header::{ACCEPT, ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 
@@ -250,28 +250,17 @@ async fn head_file(
         Err(_) => return Err(not_found().await),
     };
     let file_size = file.metadata().await.unwrap().len();
-    let transaction_id = find_current_trace_id().unwrap();
 
-    let progress_reader = ProgressReader::new(
-        file,
-        file_size as u32,
-        transaction_id,
-        file_path,
-        app_state.progress_channel_sender,
-    );
-    let frame_reader = FramedRead::new(progress_reader, BytesCodec::new());
-    // let body_stream = http_body_util::BodyStream::new(frame_reader);
-    let body = Body::from_stream(frame_reader);
-
-    let mut headers = axum::http::HeaderMap::new();
+    let mut headers = HeaderMap::new();
     headers.insert(CONTENT_LENGTH, file_size.to_string().parse().unwrap());
-    Ok((headers, body))
+    Ok(headers)
 }
 
 #[instrument(skip(app_state))]
 async fn download_file(
     State(app_state): State<App>,
     Path((share_id, file_id)): Path<(String, u32)>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let file_path = match sqlx::query!(
         r#"SELECT path as file_path
@@ -287,29 +276,74 @@ async fn download_file(
         Err(_) => return Err(not_found().await),
     };
 
-    let file = match tokio::fs::File::open(file_path.clone()).await {
+    let mut file = match tokio::fs::File::open(file_path.clone()).await {
         Ok(file) => file,
         Err(_) => return Err(not_found().await),
     };
     let file_size = file.metadata().await.unwrap().len();
     let transaction_id = find_current_trace_id().unwrap();
 
+    // Handle range request
+    let (start, end) = if let Some(range) = headers.get(RANGE) {
+        if let Ok(range_str) = range.to_str() {
+            if let Some(range_val) = range_str.strip_prefix("bytes=") {
+                let ranges: Vec<&str> = range_val.split('-').collect();
+                if ranges.len() == 2 {
+                    let start = ranges[0].parse::<u64>().unwrap_or(0);
+                    let end = ranges[1].parse::<u64>().unwrap_or(file_size - 1).min(file_size - 1);
+                    if start <= end {
+                        (start, end)
+                    } else {
+                        (0, file_size - 1)
+                    }
+                } else {
+                    (0, file_size - 1)
+                }
+            } else {
+                (0, file_size - 1)
+            }
+        } else {
+            (0, file_size - 1)
+        }
+    } else {
+        (0, file_size - 1)
+    };
+
+    // Seek to the start position if it's not 0
+    if start > 0 {
+        use tokio::io::AsyncSeekExt;
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
+            return Ok((StatusCode::INTERNAL_SERVER_ERROR, format!("Something went wrong: {}", e)).into_response());
+        }
+    }
+
+    let content_length = end - start + 1;
     let progress_reader = ProgressReader::new(
         file,
-        file_size as u32,
+        content_length as u32,
         transaction_id,
         file_path,
         app_state.progress_channel_sender,
+        start,
     );
     let frame_reader = FramedRead::new(progress_reader, BytesCodec::new());
     // let body_stream = http_body_util::BodyStream::new(frame_reader);
     let body = Body::from_stream(frame_reader);
 
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(CONTENT_LENGTH, file_size.to_string().parse().unwrap());
-    Ok((headers, body))
-
-    //Ok((headers, body))
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, content_length.to_string().parse().unwrap());
+    
+    if start != 0 || end != file_size - 1 {
+        headers.insert(
+            CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, end, file_size).parse().unwrap(),
+        );
+        headers.insert(ACCEPT_RANGES, "bytes".parse().unwrap());
+        Ok((StatusCode::PARTIAL_CONTENT, headers, body).into_response())
+    } else {
+        headers.insert(ACCEPT_RANGES, "bytes".parse().unwrap());
+        Ok((headers, body).into_response())
+    }
 }
 
 #[instrument(skip(app_state))]

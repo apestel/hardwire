@@ -16,6 +16,7 @@ pub struct ProgressReader<R> {
     transaction_id: String,
     file_path: String,
     channel_sender: broadcast::Sender<Event>,
+    start_offset: u64,
 }
 
 impl<R> ProgressReader<R> {
@@ -25,6 +26,7 @@ impl<R> ProgressReader<R> {
         transaction_id: String,
         file_path: String,
         channel_sender: broadcast::Sender<Event>,
+        start_offset: u64,
     ) -> Self {
         // CREATE TABLE downloads (
         // id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +44,7 @@ impl<R> ProgressReader<R> {
             transaction_id,
             file_path,
             channel_sender,
+            start_offset,
         }
     }
 
@@ -65,6 +68,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
                     transaction_id: self.transaction_id.clone(),
                     total_bytes: self.total_bytes,
                     read_bytes: self.read_bytes,
+                    start_offset: self.start_offset,
                 }))
                 .unwrap();
         }
@@ -90,6 +94,7 @@ pub struct FileDownload {
     read_bytes: usize,
     transaction_id: String,
     file_path: String,
+    start_offset: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
