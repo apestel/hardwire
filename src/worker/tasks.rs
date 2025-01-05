@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sevenz_rust::{self, SevenZArchiveEntry};
+use sevenz_rust::{self, SevenZArchiveEntry, SevenZMethod};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
@@ -238,14 +238,18 @@ async fn create_7z_archive_with_progress<P: AsRef<Path>>(
     // Create archive with collected files
     tokio::task::spawn_blocking(move || {
         let mut archive = sevenz_rust::SevenZWriter::new(writer)?;
-
+        // Compression methods should be set to COPY to avoid performance penalty. Unfortunately it's not supported yet.
+        // LZMA2 is in used but should support multithreading in the future to perform better (quite slow right now)
+        let mut compression_methods = vec![sevenz_rust::SevenZMethodConfiguration::from(
+            // sevenz_rust::SevenZMethod::COPY,
+            sevenz_rust::SevenZMethod::LZMA2,
+        )];
         if let Some(pass) = password {
-            archive.set_content_methods(vec![sevenz_rust::AesEncoderOptions::new(
-                sevenz_rust::Password::from(pass.as_str()),
-            )
-            .into()]);
+            compression_methods.push(sevenz_rust::SevenZMethodConfiguration::from(
+                sevenz_rust::AesEncoderOptions::new(sevenz_rust::Password::from(pass.as_str())),
+            ));
         }
-
+        archive.set_content_methods(compression_methods);
         for (file_path, name) in files_to_compress {
             let file = File::open(&file_path)?;
             let reader = BufReader::new(file);
