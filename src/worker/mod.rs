@@ -23,13 +23,19 @@ pub struct ArchiveInput {
     pub output_path: PathBuf,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(rename_all = "snake_case")]
 pub enum TaskStatus {
     Pending,
     Running,
     Completed,
     Failed,
+}
+
+impl Default for TaskStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -52,6 +58,15 @@ pub struct Task {
     pub finished_at: Option<i64>,
     pub error: Option<String>,
     pub progress: i32,
+}
+
+#[derive(Default)]
+struct TaskUpdate {
+    status: TaskStatus,
+    error: Option<String>,
+    progress: Option<i32>,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,36 +154,38 @@ impl TaskManager {
     ) -> Result<()> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-        let mut query = String::from("UPDATE tasks SET status = ?, error = COALESCE(?, error)");
+        let mut update = TaskUpdate {
+            status: status.clone(),
+            error,
+            progress,
+            ..Default::default()
+        };
 
-        let mut values: Vec<String> = vec![status.to_string(), error.unwrap_or_default()];
-
-        if let Some(prog) = progress {
-            query.push_str(", progress = ?");
-            values.push(prog.to_string());
-        }
-
+        // Set timestamps based on status
         match status {
-            TaskStatus::Running => {
-                query.push_str(", started_at = ?");
-                values.push(now.to_string());
-            }
-            TaskStatus::Completed | TaskStatus::Failed => {
-                query.push_str(", finished_at = ?");
-                values.push(now.to_string());
-            }
-            _ => {}
+            TaskStatus::Running => update.started_at = Some(now),
+            TaskStatus::Completed | TaskStatus::Failed => update.finished_at = Some(now),
+            TaskStatus::Pending => todo!(),
         }
 
-        query.push_str(" WHERE id = ?");
-        values.push(task_id.to_string());
-
-        let mut q = sqlx::query(&query);
-        for value in values {
-            q = q.bind(value);
-        }
-
-        q.execute(&self.db).await?;
+        // Build query with only non-null fields
+        sqlx::query(
+            "UPDATE tasks SET 
+                status = ?,
+                error = COALESCE(?, error),
+                progress = COALESCE(?, progress),
+                started_at = COALESCE(?, started_at),
+                finished_at = COALESCE(?, finished_at)
+            WHERE id = ?",
+        )
+        .bind(update.status.to_string())
+        .bind(update.error)
+        .bind(update.progress)
+        .bind(update.started_at)
+        .bind(update.finished_at)
+        .bind(task_id)
+        .execute(&self.db)
+        .await?;
 
         Ok(())
     }

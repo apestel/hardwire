@@ -1,10 +1,9 @@
 use anyhow::Result;
-use sevenz_rust::{self, SevenZArchiveEntry, SevenZMethod};
+use sevenz_rust::{self, SevenZArchiveEntry};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::time;
 use walkdir::WalkDir;
 

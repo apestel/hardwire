@@ -1,0 +1,6 @@
+CREATE TABLE admin_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    google_id TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);

@@ -29,6 +29,35 @@ Very basic, probably not production ready except if you're willing like me to ha
         -V, --version                Print version information
 
 
+## Create the first Admin user
+
+1. First, run database migrations:
+```bash
+make db-migrate
+# or
+sqlx migrate run
+```
+
+2. Get your Google ID:
+   - Go to [Google OAuth 2.0 Playground](https://developers.google.com/oauthplayground/)
+   - Click on "OAuth 2.0 Configuration" in the top right
+   - Select your OAuth credentials
+   - Choose "Google OAuth2 API v2" from the list
+   - Select "https://www.googleapis.com/auth/userinfo.profile" and "https://www.googleapis.com/auth/userinfo.email"
+   - Click "Authorize APIs"
+   - After authorization, click "Exchange authorization code for tokens"
+   - Click "Step 3 - Configure request to API"
+   - Make a GET request to https://www.googleapis.com/oauth2/v2/userinfo
+   - In the response, you'll find your Google ID in the "id" field
+
+3. Insert the first admin user in the SQLite Database:
+```sql
+INSERT INTO admin_users (email, google_id) 
+VALUES ('your-email@gmail.com', 'your-google-id');
+```
+
+After this setup, you can use the admin API to manage other admin users.
+
 | Environment variable | Default value         | Description                            |
 |----------------------|-----------------------|----------------------------------------|
 | HARDWIRE_HOST        | http://localhost:8080 | Base URI used to generate shared links |

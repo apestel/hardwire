@@ -1,14 +1,9 @@
-use axum::extract::ws::WebSocket;
-
 use axum::http::header::{ACCEPT, ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::Json;
-
 use url::Url;
 
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
-use file_indexer::FileInfo;
 use http::request::Parts as RequestParts;
 
 // use qbittorrent::{data::Torrent, traits::TorrentData, Api};
@@ -28,7 +23,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow,Result};
 use std::env;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use askama::Template;
@@ -38,16 +32,17 @@ extern crate chrono;
 
 type Db = sqlx::SqlitePool;
 
-use axum::routing::{get, head, post};
-use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
+use axum::routing::{get, head};
+use axum::extract::{ Path, State};
 
 
 mod file_indexer;
 mod progress;
 mod worker;
+mod admin;
 use progress::ProgressReader;
 use tracing_opentelemetry_instrumentation_sdk::find_current_trace_id;
-use worker::{Task, TaskInput, TaskManager, tasks::TaskWorker};
+use worker::{TaskManager, tasks::TaskWorker};
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -93,6 +88,7 @@ struct App {
     progress_channel_sender: broadcast::Sender<progress::Event>,
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
+    server_config: ServerConfig,
 }
 
 impl App {
@@ -101,12 +97,14 @@ impl App {
         progress_channel_sender: broadcast::Sender<progress::Event>,
         task_manager: Arc<TaskManager>,
         indexer: file_indexer::FileIndexer,
+        server_config: ServerConfig
     ) -> Self {
         App {
             db_pool: pool,
             progress_channel_sender,
             task_manager,
             indexer,
+            server_config,
         }
     }
 }
@@ -323,31 +321,6 @@ async fn download_file(
     }
 }
 
-#[instrument(skip(app_state))]
-async fn list_files(State(app_state): State<App>) -> Json<Option<Vec<FileInfo>>> {
-    let files = app_state.indexer.files.lock().unwrap().clone();
-    Json(files)
-
-    // json!(*app_state.indexer.files.lock().unwrap());
-}
-
-async fn create_shared_link(
-    State(app_state): State<App>,
-    Json(files): Json<Vec<String>>,
-) -> Json<Option<String>> {
-    // Validate input
-    for file in &files {
-        if file.contains("..") || file.contains("\0") {
-            return Json(None);
-        }
-    }
-
-    match publish_files(files, &ServerConfig::new().host, &app_state.db_pool).await {
-        Ok(link) => Json(Some(link)),
-        Err(_) => Json(None),
-    }
-}
-
 async fn publish_files(
     files: Vec<String>,
     base_url: &String,
@@ -407,11 +380,12 @@ async fn publish_files(
     Err(anyhow::Error::msg("failed to create share link"))
 }
 
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: u16,
     pub base_path: String,
     pub host: String,
-    pub data_dir: PathBuf,
+    pub data_dir: Arc<PathBuf>,
 }
 
 impl ServerConfig {
@@ -429,7 +403,7 @@ impl ServerConfig {
             port: Self::port_from_env(),
             base_path: Self::base_path_from_env(),
             host: Self::host_from_env(),
-            data_dir: Self::data_dir_from_env(),
+            data_dir: Arc::new(Self::data_dir_from_env()),
         }
     }
 
@@ -462,46 +436,7 @@ async fn not_found() -> (StatusCode, Html<String>) {
     (StatusCode::NOT_FOUND, Html(t.render().unwrap()))
 }
 
-/// The handler for the HTTP request (this gets called when the HTTP GET lands at the start
-/// of websocket negotiation). After this completes, the actual switching from HTTP to
-/// websocket protocol will occur.
-/// This is the last point where we can extract TCP/IP metadata such as IP address of the client
-/// as well as things from HTTP headers such as user-agent of the browser etc.
-async fn ws_handler(
-    State(app_state): State<App>,
-    ws: WebSocketUpgrade,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-) -> impl IntoResponse {
-    // finalize the upgrade process by returning upgrade callback.
-    // we can customize the callback by sending additional info such as address.
-    ws.on_upgrade(move |socket| handle_socket(socket, addr, app_state))
-}
 
-async fn handle_socket(mut socket: WebSocket, who: SocketAddr, app_state: App) {
-    tracing::info!("Websocket connection from: {}", who);
-    let mut rx = app_state.progress_channel_sender.subscribe();
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    if let Err(err) = socket
-                        .send(axum::extract::ws::Message::Text(
-                            serde_json::json!(msg).to_string().into(),
-                        ))
-                        .await
-                    {
-                        tracing::error!("WS socket send error: {}", err);
-                        break;
-                    }
-                }
-                Err(err) => {
-                    tracing::error!("WS channel recv error: {}", err);
-                    break;
-                }
-            }
-        }
-    });
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -509,7 +444,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let server_config = ServerConfig::new();
-    let db_pool = init_db(server_config.data_dir).await;
+    let db_pool = init_db(server_config.data_dir.to_path_buf()).await;
 
     if cli.files.is_empty() && !cli.server {
         // let out = std::io::stdout();
@@ -542,18 +477,15 @@ async fn main() -> Result<()> {
             worker.run().await;
         });
 
-        let app_state = App::new(db_pool, progress_channel_sender, task_manager, indexer);
+        let server_config_clone = server_config.clone();
+        let app_state = App::new(db_pool, progress_channel_sender, task_manager, indexer, server_config_clone);
 
         let app = axum::Router::new()
             .route("/s/{share_id}", get(list_shared_files))
             .route("/s/{share_id}/{file_id}", head(head_file).get(download_file))
-            .route("/admin/tasks", post(create_task))
-            .route("/admin/tasks/{task_id}", get(get_task_status))
             .route("/healthcheck", get(healthcheck))
             .nest_service("/assets", ServeDir::new("dist/"))
-            .route("/admin/live_update", get(ws_handler))
-            .route("/admin/list_files", get(list_files))
-            .route("/admin/create_shared_link", post(create_shared_link))
+            .nest("/admin", admin::admin_router())
             .with_state(app_state)
             // include trace context as header into the response
             .layer(OtelInResponseLayer)
@@ -609,42 +541,4 @@ async fn shutdown_signal() {
 
     tracing::warn!("signal received, starting graceful shutdown");
     opentelemetry::global::shutdown_tracer_provider();
-}
-
-async fn create_task(
-    State(app_state): State<App>,
-    Json(input): Json<TaskInput>,
-) -> Result<Json<String>, Response> {
-    let task_id = app_state
-        .task_manager
-        .create_task(input)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create task: {}", e),
-            )
-                .into_response()
-        })?;
-
-    Ok(Json(task_id))
-}
-
-async fn get_task_status(
-    State(app_state): State<App>,
-    Path(task_id): Path<String>,
-) -> Result<Json<Task>, Response> {
-    let task = app_state
-        .task_manager
-        .get_task_status(&task_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to get task status: {}", e),
-            )
-                .into_response()
-        })?;
-
-    Ok(Json(task))
 }
