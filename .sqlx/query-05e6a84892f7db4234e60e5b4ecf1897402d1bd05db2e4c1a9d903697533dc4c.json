@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT path as file_path\n        FROM files JOIN share_link_files ON share_link_files.file_id=files.id\n        WHERE files.id=$1 AND share_link_files.share_link_id=$2",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_path",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "05e6a84892f7db4234e60e5b4ecf1897402d1bd05db2e4c1a9d903697533dc4c"
+}

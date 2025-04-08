@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT \n                id,\n                status as \"status: TaskStatus\",\n                created_at,\n                started_at,\n                finished_at,\n                error,\n                COALESCE(progress, 0) as \"progress!: i32\"\n            FROM tasks\n            WHERE id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status: TaskStatus",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "started_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "finished_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "error",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "progress!: i32",
+        "ordinal": 6,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "97ebe51e1844590c14244dab1cd8544a9f036da7a21b515d17e8dbe0b32c3624"
+}

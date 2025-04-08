@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO share_link_files (share_link_id, file_id) VALUES ($1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e897c35cc08374087cfc8d43ee654f5608a1a15d3c34e9e1ebb33de115d457e1"
+}

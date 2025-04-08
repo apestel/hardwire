@@ -1,4 +1,6 @@
-use axum::http::header::{ACCEPT, ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use axum::http::header::{
+    ACCEPT, ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, RANGE,
+};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use url::Url;
@@ -21,7 +23,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use std::fs::File;
 use std::sync::Arc;
 
-use anyhow::{anyhow,Result};
+use anyhow::{Result, anyhow};
 use std::env;
 use std::path::PathBuf;
 
@@ -32,14 +34,13 @@ extern crate chrono;
 
 type Db = sqlx::SqlitePool;
 
+use axum::extract::{Path, State};
 use axum::routing::{get, head};
-use axum::extract::{ Path, State};
 
-
+mod admin;
 mod file_indexer;
 mod progress;
 mod worker;
-mod admin;
 use progress::ProgressReader;
 use tracing_opentelemetry_instrumentation_sdk::find_current_trace_id;
 use worker::{TaskManager, tasks::TaskWorker};
@@ -97,7 +98,7 @@ impl App {
         progress_channel_sender: broadcast::Sender<progress::Event>,
         task_manager: Arc<TaskManager>,
         indexer: file_indexer::FileIndexer,
-        server_config: ServerConfig
+        server_config: ServerConfig,
     ) -> Self {
         App {
             db_pool: pool,
@@ -120,12 +121,17 @@ async fn init_db(data_dir: PathBuf) -> Db {
         .create_if_missing(true);
 
     // opts.disable_statement_logging();
-    match Db::connect_with(opts).await {
+    let db = match Db::connect_with(opts).await {
         Ok(db) => db,
         Err(e) => {
             panic!("Failed to connect to SQLx database: {}", e);
         }
-    } 
+    };
+
+    if let Err(e) = sqlx::migrate!().run(&db).await {
+        panic!("Failed to initialize SQLx database: {}", e);
+    }
+    db
 }
 
 struct ShareLink {
@@ -135,7 +141,7 @@ struct ShareLink {
 
 #[derive(Template)] // this will generate the code...
 #[template(path = "404.html")] // using the template in this path, relative
-                               // to the `templates` dir in the crate root
+// to the `templates` dir in the crate root
 struct T404 {
     // the name of the struct can be anything
     // the field name should match the variable name
@@ -144,7 +150,7 @@ struct T404 {
 
 #[derive(Template)] // this will generate the code...
 #[template(path = "list_files.html", print = "all")] // using the template in this path, relative
-                                                     // to the `templates` dir in the crate root
+// to the `templates` dir in the crate root
 struct DownloadFilesTemplate {
     // the name of the struct can be anything
     // the field name should match the variable name
@@ -155,22 +161,28 @@ struct DownloadFilesTemplate {
     first_filename: String,
 }
 
-async fn list_shared_files(
-    State(app_state): State<App>,
-    Path(share_id): Path<String>,
-) -> Response {
+async fn list_shared_files(State(app_state): State<App>, Path(share_id): Path<String>) -> Response {
     let result = async move {
         let shared_links: Vec<(String, i64, String)> = sqlx::query_as(
-            r#"SELECT files.path AS "filename!", files.id AS "link!", substr(files.path, instr(files.path, '/') + 1) AS "short_filename!"
-        FROM share_links JOIN share_link_files ON share_links.id=share_link_files.share_link_id
-        JOIN files ON share_link_files.file_id=files.id
-        WHERE share_links.id = ?"#
+            r#"SELECT
+    files.path AS "filename!",
+    files.id AS "link!",
+    -- This part extracts the filename after the last '/'
+    replace(files.path, rtrim(files.path, replace(files.path, '/', '')), '') AS "short_filename!"
+FROM
+    share_links
+JOIN
+    share_link_files ON share_links.id = share_link_files.share_link_id
+JOIN
+    files ON share_link_files.file_id = files.id
+WHERE
+    share_links.id = ?;"#,
         )
         .bind(share_id.clone())
         .fetch_all(&app_state.db_pool)
         .await?;
         let server = ServerConfig::new();
-        
+
         if !shared_links.is_empty() {
             let t = DownloadFilesTemplate {
                 files: shared_links
@@ -194,7 +206,11 @@ async fn list_shared_files(
 
     match result {
         Ok(response) => response.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Something went wrong: {}", e)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", e),
+        )
+            .into_response(),
     }
 }
 
@@ -265,7 +281,10 @@ async fn download_file(
                 let ranges: Vec<&str> = range_val.split('-').collect();
                 if ranges.len() == 2 {
                     let start = ranges[0].parse::<u64>().unwrap_or(0);
-                    let end = ranges[1].parse::<u64>().unwrap_or(file_size - 1).min(file_size - 1);
+                    let end = ranges[1]
+                        .parse::<u64>()
+                        .unwrap_or(file_size - 1)
+                        .min(file_size - 1);
                     if start <= end {
                         (start, end)
                     } else {
@@ -288,7 +307,11 @@ async fn download_file(
     if start > 0 {
         use tokio::io::AsyncSeekExt;
         if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-            return Ok((StatusCode::INTERNAL_SERVER_ERROR, format!("Something went wrong: {}", e)).into_response());
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Something went wrong: {}", e),
+            )
+                .into_response());
         }
     }
 
@@ -307,11 +330,13 @@ async fn download_file(
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_LENGTH, content_length.to_string().parse().unwrap());
-    
+
     if start != 0 || end != file_size - 1 {
         headers.insert(
             CONTENT_RANGE,
-            format!("bytes {}-{}/{}", start, end, file_size).parse().unwrap(),
+            format!("bytes {}-{}/{}", start, end, file_size)
+                .parse()
+                .unwrap(),
         );
         headers.insert(ACCEPT_RANGES, "bytes".parse().unwrap());
         Ok((StatusCode::PARTIAL_CONTENT, headers, body).into_response())
@@ -436,8 +461,6 @@ async fn not_found() -> (StatusCode, Html<String>) {
     (StatusCode::NOT_FOUND, Html(t.render().unwrap()))
 }
 
-
-
 #[tokio::main]
 async fn main() -> Result<()> {
     pretty_env_logger::init();
@@ -469,7 +492,7 @@ async fn main() -> Result<()> {
         // Initialize task manager
         let (task_manager, task_receiver) = TaskManager::new(db_pool.clone());
         let task_manager = Arc::new(task_manager);
-        
+
         // Start task worker
         let worker_task_manager = Arc::clone(&task_manager);
         tokio::spawn(async move {
@@ -478,11 +501,20 @@ async fn main() -> Result<()> {
         });
 
         let server_config_clone = server_config.clone();
-        let app_state = App::new(db_pool, progress_channel_sender, task_manager, indexer, server_config_clone);
+        let app_state = App::new(
+            db_pool,
+            progress_channel_sender,
+            task_manager,
+            indexer,
+            server_config_clone,
+        );
 
         let app = axum::Router::new()
             .route("/s/{share_id}", get(list_shared_files))
-            .route("/s/{share_id}/{file_id}", head(head_file).get(download_file))
+            .route(
+                "/s/{share_id}/{file_id}",
+                head(head_file).get(download_file),
+            )
             .route("/healthcheck", get(healthcheck))
             .nest_service("/assets", ServeDir::new("dist/"))
             .nest("/admin", admin::admin_router())

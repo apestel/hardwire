@@ -1,17 +1,16 @@
 use axum::{
-    extract::{ws::WebSocket, ConnectInfo, FromRequestParts, Path, State, WebSocketUpgrade},
-    http::{request::Parts, StatusCode},
+    Json, Router,
+    extract::{ConnectInfo, FromRequestParts, Path, State, WebSocketUpgrade, ws::WebSocket},
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use oauth2::{
-    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope,
-    TokenResponse, TokenUrl,
+    AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Sqlite};
 use std::{fmt::Debug, sync::Arc};
 use tokio::net::unix::SocketAddr;
 
@@ -122,11 +121,6 @@ pub fn create_oauth_client() -> BasicClient {
     )
 }
 
-pub async fn init_db(_pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
-    // Table creation is now handled by migrations
-    Ok(())
-}
-
 pub async fn google_login(State(_app): State<App>) -> impl IntoResponse {
     let client = create_oauth_client();
     let (auth_url, _csrf_token) = client
@@ -202,7 +196,7 @@ pub async fn google_callback(
                 StatusCode::UNAUTHORIZED,
                 "You are not authorized to access this area",
             )
-                .into_response())
+                .into_response());
         }
     };
 
@@ -234,6 +228,46 @@ pub async fn google_callback(
 pub enum ApiResponse<T> {
     Success(T),
     Error(ApiError),
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DownloadRecord {
+    pub id: i64,
+    pub file_path: String,
+    pub ip_address: String,
+    pub transaction_id: String,
+    pub status: String,
+    pub file_size: i64,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownloadStats {
+    pub total_downloads: i64,
+    pub total_size: i64,
+    pub completed_downloads: i64,
+    pub average_download_time: Option<f64>, // en secondes
+    pub success_rate: f64,                  // pourcentage
+}
+
+#[derive(Debug, Serialize)]
+pub struct DownloadsByPeriod {
+    pub period: String, // "day", "week", "month"
+    pub data: Vec<PeriodData>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PeriodData {
+    pub date: String,
+    pub count: i64,
+    pub size: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PeriodQuery {
+    pub period: Option<String>, // "day", "week", "month"
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -376,6 +410,177 @@ pub async fn list_files(
 ) -> impl IntoResponse {
     let files = app_state.indexer.files.lock().unwrap().as_ref().cloned();
     ApiResponse::Success(files)
+}
+
+pub async fn download_stats(
+    State(app): State<App>,
+    _auth: AdminAuthMiddleware,
+) -> impl IntoResponse {
+    // Récupérer les statistiques globales de téléchargement
+    let result = sqlx::query!(
+        r#"
+        SELECT
+            COUNT(*) as total_downloads,
+            COALESCE(SUM(file_size), 0) as total_size,
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed_downloads,
+            AVG(CASE WHEN status = 'completed' AND finished_at IS NOT NULL AND started_at IS NOT NULL
+                THEN (finished_at - started_at) ELSE NULL END) as avg_download_time,
+            COALESCE((SUM(CASE WHEN status = 'completed' THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(*), 0) * 100.0), 0.0) as success_rate
+        FROM download
+        "#
+    )
+    .fetch_one(&app.db_pool)
+    .await;
+
+    match result {
+        Ok(row) => {
+            let stats = DownloadStats {
+                total_downloads: row.total_downloads,
+                total_size: row.total_size,
+                completed_downloads: row.completed_downloads,
+                average_download_time: if let Some(time) = row.avg_download_time {
+                    Some(time as f64)
+                } else {
+                    None
+                },
+                success_rate: row.success_rate,
+            };
+            ApiResponse::Success(stats)
+        }
+        Err(err) => ApiResponse::Error(err.into()),
+    }
+}
+
+pub async fn download_stats_by_period(
+    State(app): State<App>,
+    _auth: AdminAuthMiddleware,
+    axum::extract::Query(query): axum::extract::Query<PeriodQuery>,
+) -> impl IntoResponse {
+    // Extraire les valeurs de la requête
+    let period_str = query.period.as_deref().unwrap_or("day");
+    let limit = query.limit.unwrap_or(30);
+
+    // Déterminer le format de date
+    let time_format = match period_str {
+        "day" => "%Y-%m-%d",
+        "week" => "%Y-%W", // Format ISO semaine
+        "month" => "%Y-%m",
+        _ => "%Y-%m-%d", // Par défaut jour
+    };
+
+    // Créer une période pour le résultat
+    let period = period_str.to_string();
+
+    // Utiliser une requête SQL qui retourne des valeurs non-nulles
+    let result = sqlx::query!(
+        r#"
+        SELECT
+            COALESCE(strftime($1, datetime(started_at, 'unixepoch')), '') as date,
+            COUNT(*) as count,
+            COALESCE(SUM(file_size), 0) as size
+        FROM download
+        GROUP BY date
+        ORDER BY date DESC
+        LIMIT $2
+        "#,
+        time_format,
+        limit
+    )
+    .fetch_all(&app.db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let data = rows
+                .into_iter()
+                .map(|row| PeriodData {
+                    date: row.date,
+                    count: row.count,
+                    size: row.size,
+                })
+                .collect();
+
+            ApiResponse::Success(DownloadsByPeriod { period, data })
+        }
+        Err(err) => ApiResponse::Error(err.into()),
+    }
+}
+
+pub async fn recent_downloads(
+    State(app): State<App>,
+    _auth: AdminAuthMiddleware,
+    axum::extract::Query(query): axum::extract::Query<PeriodQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(50);
+
+    // Utiliser une requête SQL brute pour éviter les problèmes de conversion
+    let result = sqlx::query!(
+        r#"
+        SELECT
+            id, file_path, ip_address, transaction_id, status, file_size, started_at,
+            finished_at
+        FROM download
+        ORDER BY started_at DESC
+        LIMIT ?
+        "#,
+        limit
+    )
+    .fetch_all(&app.db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let downloads: Vec<DownloadRecord> = rows
+                .into_iter()
+                .map(|row| DownloadRecord {
+                    id: row.id,
+                    file_path: row.file_path.unwrap_or_else(|| String::new()),
+                    ip_address: row.ip_address.unwrap_or_else(|| String::new()),
+                    transaction_id: row.transaction_id.unwrap_or_else(|| String::new()),
+                    status: row.status.unwrap_or_else(|| String::new()),
+                    file_size: row.file_size.unwrap_or(0),
+                    started_at: row.started_at.unwrap_or(0),
+                    finished_at: row.finished_at,
+                })
+                .collect();
+            ApiResponse::Success(downloads)
+        }
+        Err(err) => ApiResponse::Error(err.into()),
+    }
+}
+
+pub async fn download_status_distribution(
+    State(app): State<App>,
+    _auth: AdminAuthMiddleware,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        r#"
+        SELECT
+            status,
+            COUNT(*) as count
+        FROM download
+        GROUP BY status
+        "#
+    )
+    .fetch_all(&app.db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let data: Vec<_> = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "status": row.status,
+                        "count": row.count
+                    })
+                })
+                .collect();
+
+            ApiResponse::Success(data)
+        }
+        Err(err) => ApiResponse::Error(err.into()),
+    }
 }
 
 pub async fn create_shared_link(
@@ -531,4 +736,15 @@ pub fn admin_router() -> Router<App> {
         // .route("/live_update", get(ws_handler))
         .route("/api/list_files", get(list_files))
         .route("/api/create_shared_link", post(create_shared_link))
+        // Nouvelles routes pour les statistiques de téléchargement
+        .route("/api/stats/downloads", get(download_stats))
+        .route(
+            "/api/stats/downloads/by_period",
+            get(download_stats_by_period),
+        )
+        .route("/api/stats/downloads/recent", get(recent_downloads))
+        .route(
+            "/api/stats/downloads/status",
+            get(download_status_distribution),
+        )
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT input_data FROM tasks WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "input_data",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b894b085def4d701e5b8178c5a86498eb128888d9220e4a0414e7f6081491020"
+}

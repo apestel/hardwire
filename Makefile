@@ -22,7 +22,7 @@ build: css db-migrate
 	cargo build -r
 
 push:
-	docker build -t pestouille/hardwire:0.0.7 .
+	docker build --platform linux/amd64 -t pestouille/hardwire:0.0.7 .
 	docker push pestouille/hardwire:0.0.7
 
 deploy:
