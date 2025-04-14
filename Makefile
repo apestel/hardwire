@@ -5,7 +5,7 @@ clean:
 	rm dist/output.css
 
 css:
-	npx tailwindcss -i ./static/css/input.css -o ./dist/css/output.css
+	npx @tailwindcss/cli -i ./static/css/input.css -o ./dist/css/output.css
 
 sqlx-setup:
 	cargo install sqlx-cli
@@ -22,8 +22,8 @@ build: css db-migrate
 	cargo build -r
 
 push:
-	docker build --platform linux/amd64 -t pestouille/hardwire:0.0.7 .
-	docker push pestouille/hardwire:0.0.7
+	docker build --platform linux/amd64 -t pestouille/hardwire:0.1.0 .
+	docker push pestouille/hardwire:0.1.0
 
 deploy:
 	ssh orion 'cd /opt/apps/services && echo `pwd` && docker compose pull && docker compose up -d'

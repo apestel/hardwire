@@ -1,34 +1,136 @@
-<html class="dark">
+<!DOCTYPE html>
+<html class="dark" lang="en">
 
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta property="og:type" content="website">
     <meta property="og:url" content="{{ hardwire_host }}/s/{{ share_id }}">
     <meta property="og:title" content="HardWire: {{ first_filename }}">
-    <meta property="og:description" content="HardWire let you share files">
+    <meta property="og:description" content="HardWire - Secure file sharing made simple">
     <meta property="og:image" content="https://linkfork.co/images/poster.png">
     <title>HardWire: {{ first_filename }}</title>
     <link rel="stylesheet" href="/assets/css/output.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 
-<body>
+<body
+    class="font-['Inter'] transition bg-[rgba(255,255,255,0.97)] text-slate-800 dark:bg-[rgba(15,23,42,0.97)] dark:text-white">
+    <div class="min-h-screen flex flex-col justify-between">
+        <!-- Theme Toggle Button -->
+        <div class="fixed top-4 right-4 cursor-pointer rounded-full p-2 flex items-center justify-center bg-[rgba(0,0,0,0.1)] transition hover:bg-[rgba(0,0,0,0.2)] dark:bg-[rgba(255,255,255,0.1)] dark:hover:bg-[rgba(255,255,255,0.2)]"
+            id="themeToggle" title="Toggle dark/light mode">
+            <!-- Sun icon (shown in dark mode) -->
+            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 text-yellow-300 dark:hidden block" fill="none"
+                viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+            </svg>
+            <!-- Moon icon (shown in light mode) -->
+            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 text-gray-700 dark:block hidden" fill="none"
+                viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+            </svg>
+        </div>
 
-    <div class="bg-[url('/assets/images/background.jpg')] w-full h-screen bg-cover bg-center">
-        <div class="flex justify-center pt-80">
-            <div class="w-6/12 pt-12 h-80 bg-slate-700 drop-shadow-md rounded-lg">
-                <div class="ml-4 h-24 text-7xl text-neutral-50 dark:text-white ">
-                    <h1>HardWire</h1>
+        <div class="max-w-[800px] w-full mx-auto px-4">
+            <!-- Header -->
+            <header
+                class="flex items-center justify-center py-6 border-b border-[rgba(0,0,0,0.1)] dark:border-[rgba(255,255,255,0.1)]">
+                <svg xmlns="http://www.w3.org/2000/svg" class="size-6 text-indigo-500" fill="none" viewBox="0 0 24 24"
+                    stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <h1 class="text-indigo-500 ml-2 text-xl font-semibold">HardWire</h1>
+            </header>
+
+            <div class="text-center py-2 text-sm">
+                <p>Secure file sharing made simple</p>
+            </div>
+
+            <!-- Files Section -->
+            <section class="py-6">
+                <div class="flex items-center mb-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="size-5 text-gray-400" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <h2 class="font-semibold text-xl ml-2">Shared Files</h2>
                 </div>
-                <div class="px-6">
+                <p class="text-sm text-gray-400 mb-4">Click on a file to download</p>
+
+                <div>
                     {% for file in files %}
-                    <a class="dark:text-white px-6 text-3xl shadow-lg rounded-lg h-14 bg-gradient-to-r from-sky-500 to-indigo-500"
-                        href='{{ hardwire_host }}/s/{{ share_id }}/{{ file.link }}'" type=" button" download='{{
-                        file.short_filename }}'>{{
-                        file.short_filename }}</a>
+                    <div
+                        class="bg-[rgba(0,0,0,0.05)] rounded-lg mb-2 transition duration-200 hover:bg-[rgba(0,0,0,0.1)] dark:bg-[rgba(255,255,255,0.05)] dark:hover:bg-[rgba(255,255,255,0.1)]">
+                        <a href="{{ hardwire_host }}/s/{{ share_id }}/{{ file.link }}"
+                            download="{{ file.short_filename }}"
+                            class="flex items-center py-3 px-4 text-slate-800 dark:text-white no-underline">
+                            <span>{{ file.short_filename }}</span>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="size-5 ml-auto" fill="none"
+                                viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                            </svg>
+                        </a>
+                    </div>
                     {% endfor %}
                 </div>
-            </div>
+            </section>
         </div>
+
+        <!-- Footer -->
+        <footer
+            class="text-center py-4 text-[rgba(0,0,0,0.5)] text-sm border-t border-[rgba(0,0,0,0.1)] dark:text-[rgba(255,255,255,0.5)] dark:border-[rgba(255,255,255,0.1)]">
+            <p>© 2025 HardWire. All rights reserved.</p>
+        </footer>
     </div>
+
+    <script>
+        // Function to toggle between dark and light mode
+        function toggleTheme() {
+            const html = document.documentElement;
+
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+                html.classList.add('light');
+                localStorage.setItem('theme', 'light');
+            } else {
+                html.classList.remove('light');
+                html.classList.add('dark');
+                localStorage.setItem('theme', 'dark');
+            }
+        }
+
+        // Set the initial theme based on user preference or system preference
+        function setInitialTheme() {
+            const html = document.documentElement;
+            const savedTheme = localStorage.getItem('theme');
+
+            if (savedTheme) {
+                html.classList.remove('dark', 'light');
+                html.classList.add(savedTheme);
+            } else {
+                // Check system preference
+                const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                html.classList.remove('dark', 'light');
+                html.classList.add(prefersDark ? 'dark' : 'light');
+                localStorage.setItem('theme', prefersDark ? 'dark' : 'light');
+            }
+        }
+
+        // Add event listener to the theme toggle button
+        document.addEventListener('DOMContentLoaded', function () {
+            const themeToggle = document.getElementById('themeToggle');
+            themeToggle.addEventListener('click', toggleTheme);
+
+            // Set initial theme
+            setInitialTheme();
+        });
+    </script>
 </body>
 
 </html>
