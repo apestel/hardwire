@@ -274,6 +274,7 @@ async fn create_7z_archive_with_progress<P: AsRef<Path>>(
 /// * `source` - Either a directory path or a list of file paths to compress
 /// * `output_path` - Path where the 7z file should be created
 /// * `password` - Optional password to encrypt the archive
+#[allow(dead_code)]
 pub async fn create_7z_archive<P: AsRef<Path>>(
     source: Vec<P>,
     output_path: PathBuf,
@@ -288,6 +289,7 @@ pub async fn create_7z_archive<P: AsRef<Path>>(
 /// * `dir_path` - Path to the directory to compress
 /// * `output_path` - Path where the 7z file should be created
 /// * `password` - Optional password to encrypt the archive
+#[allow(dead_code)]
 pub async fn create_7z_from_directory<P: AsRef<Path>>(
     dir_path: P,
     output_path: PathBuf,
@@ -302,6 +304,7 @@ pub async fn create_7z_from_directory<P: AsRef<Path>>(
 /// * `files` - List of file paths to compress
 /// * `output_path` - Path where the 7z file should be created
 /// * `password` - Optional password to encrypt the archive
+#[allow(dead_code)]
 pub async fn create_7z_from_files<P: AsRef<Path>>(
     files: Vec<P>,
     output_path: PathBuf,

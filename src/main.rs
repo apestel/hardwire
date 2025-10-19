@@ -23,8 +23,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use std::fs::File;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use std::env;
+use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 
 use askama::Template;
@@ -38,9 +37,12 @@ use axum::extract::{Path, State};
 use axum::routing::{get, head};
 
 mod admin;
+mod config;
+mod error;
 mod file_indexer;
 mod progress;
 mod worker;
+use config::Config;
 use progress::ProgressReader;
 use tracing_opentelemetry_instrumentation_sdk::find_current_trace_id;
 use worker::{TaskManager, tasks::TaskWorker};
@@ -57,30 +59,7 @@ struct Cli {
     files: Vec<String>,
 }
 
-// Make our own error that wraps `anyhow::Error`.
-struct AppError(anyhow::Error);
-
-// Tell axum how to convert `AppError` into a response.
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", self.0),
-        )
-            .into_response()
-    }
-}
-
-// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
-// `Result<_, AppError>`. That way you don't need to do that manually.
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
-    }
-}
+// AppError is now defined in the error module
 
 /// App holds the state of the application
 #[derive(Clone, Debug)]
@@ -89,7 +68,7 @@ struct App {
     progress_channel_sender: broadcast::Sender<progress::Event>,
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
-    server_config: ServerConfig,
+    config: Config,
 }
 
 impl App {
@@ -98,14 +77,14 @@ impl App {
         progress_channel_sender: broadcast::Sender<progress::Event>,
         task_manager: Arc<TaskManager>,
         indexer: file_indexer::FileIndexer,
-        server_config: ServerConfig,
+        config: Config,
     ) -> Self {
         App {
             db_pool: pool,
             progress_channel_sender,
             task_manager,
             indexer,
-            server_config,
+            config,
         }
     }
 }
@@ -181,8 +160,6 @@ WHERE
         .bind(share_id.clone())
         .fetch_all(&app_state.db_pool)
         .await?;
-        let server = ServerConfig::new();
-
         if !shared_links.is_empty() {
             let t = DownloadFilesTemplate {
                 files: shared_links
@@ -193,7 +170,7 @@ WHERE
                     })
                     .collect(),
                 share_id: share_id.to_string(),
-                hardwire_host: server.host,
+                hardwire_host: app_state.config.server.host.clone(),
                 first_filename: shared_links.first().unwrap().2.clone(),
             };
 
@@ -405,56 +382,7 @@ async fn publish_files(
     Err(anyhow::Error::msg("failed to create share link"))
 }
 
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    pub port: u16,
-    pub base_path: String,
-    pub host: String,
-    pub data_dir: Arc<PathBuf>,
-}
-
-impl ServerConfig {
-    const STD_PORT: u16 = 8090;
-    const STD_BASE_PATH: &'static str = ".";
-    const STD_HOST: &'static str = "http://localhost:8090";
-    const PORT_ENV_VAR: &'static str = "HARDWIRE_PORT";
-    const BASE_PATH_ENV_VAR: &'static str = "HARDWIRE_BASE_PATH";
-    const HOST_ENV_VAR: &'static str = "HARDWIRE_HOST";
-    const STD_HARDWIRE_DATA_DIR: &'static str = ".";
-    const HARDWIRE_DATA_DIR_ENV_VAR: &'static str = "HARDWIRE_DATA_DIR";
-
-    fn new() -> ServerConfig {
-        ServerConfig {
-            port: Self::port_from_env(),
-            base_path: Self::base_path_from_env(),
-            host: Self::host_from_env(),
-            data_dir: Arc::new(Self::data_dir_from_env()),
-        }
-    }
-
-    fn port_from_env() -> u16 {
-        // Also shortened the `match` a bit here. Could make this generic too.
-        env::var(ServerConfig::PORT_ENV_VAR)
-            .map(|val| val.parse::<u16>())
-            .unwrap_or(Ok(ServerConfig::STD_PORT))
-            .unwrap()
-    }
-
-    fn base_path_from_env() -> String {
-        env::var(ServerConfig::BASE_PATH_ENV_VAR).unwrap_or(ServerConfig::STD_BASE_PATH.to_string())
-    }
-
-    fn host_from_env() -> String {
-        env::var(ServerConfig::HOST_ENV_VAR).unwrap_or(ServerConfig::STD_HOST.to_string())
-    }
-
-    fn data_dir_from_env() -> PathBuf {
-        PathBuf::from(
-            env::var(ServerConfig::HARDWIRE_DATA_DIR_ENV_VAR)
-                .unwrap_or(ServerConfig::STD_HARDWIRE_DATA_DIR.to_string()),
-        )
-    }
-}
+// ServerConfig is now defined in the config module
 
 async fn not_found() -> (StatusCode, Html<String>) {
     let t = T404 {};
@@ -466,8 +394,13 @@ async fn main() -> Result<()> {
     pretty_env_logger::init();
 
     let cli = Cli::parse();
-    let server_config = ServerConfig::new();
-    let db_pool = init_db(server_config.data_dir.to_path_buf()).await;
+
+    // Load and validate configuration
+    let config = Config::from_env().context("Failed to load configuration")?;
+    config
+        .validate()
+        .context("Configuration validation failed")?;
+    let db_pool = init_db(config.server.data_dir.clone()).await;
 
     if cli.files.is_empty() && !cli.server {
         // let out = std::io::stdout();
@@ -475,7 +408,7 @@ async fn main() -> Result<()> {
     }
 
     if !cli.files.is_empty() {
-        let shared_link = publish_files(cli.files, &server_config.host, &db_pool).await?;
+        let shared_link = publish_files(cli.files, &config.server.host, &db_pool).await?;
         println!("Shared link: {}", shared_link);
     }
 
@@ -483,8 +416,10 @@ async fn main() -> Result<()> {
         let _ = init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers()?;
         let mut progress_manager = progress::Manager::new(db_pool.clone());
         // let base_path = "/mnt";
-        let indexer =
-            file_indexer::FileIndexer::new(&PathBuf::from(&server_config.base_path.as_str()), 60);
+        let indexer = file_indexer::FileIndexer::new(
+            &config.server.data_dir,
+            config.limits.file_indexer_interval_secs,
+        );
 
         let progress_channel_sender = progress_manager.sender.clone();
         progress_manager.start_recv_thread().await;
@@ -500,13 +435,12 @@ async fn main() -> Result<()> {
             worker.run().await;
         });
 
-        let server_config_clone = server_config.clone();
         let app_state = App::new(
             db_pool,
             progress_channel_sender,
             task_manager,
             indexer,
-            server_config_clone,
+            config.clone(),
         );
 
         let app = axum::Router::new()
@@ -538,7 +472,7 @@ async fn main() -> Result<()> {
                     .allow_credentials(true),
             );
 
-        let bind_adress = format!("0.0.0.0:{}", server_config.port);
+        let bind_adress = format!("0.0.0.0:{}", config.server.port);
         let listener = tokio::net::TcpListener::bind(bind_adress).await.unwrap();
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())

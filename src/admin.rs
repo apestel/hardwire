@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, sync::Arc};
 use tokio::net::unix::SocketAddr;
 
-use crate::App;
-
-const JWT_SECRET: &[u8] = b"your-secret-key"; // In production, use an environment variable
+use crate::{
+    App,
+    error::{AppError, AuthErrorKind},
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -45,6 +46,7 @@ pub struct AuthResponse {
 }
 
 pub struct AdminAuthMiddleware {
+    #[allow(dead_code)]
     pub user: AdminUser,
 }
 
@@ -67,22 +69,23 @@ where
                     None
                 }
             })
-            .ok_or_else(|| {
-                (StatusCode::UNAUTHORIZED, "No valid authorization header").into_response()
-            })?;
+            .ok_or_else(|| AppError::AuthError(AuthErrorKind::MissingToken).into_response())?;
+
+        // Get app state to access DB
+        let state = parts.extensions.get::<Arc<App>>().ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!("App state not found")).into_response()
+        })?;
+
+        // Get JWT secret from config
+        let jwt_secret = state.config.auth.jwt_secret.as_bytes();
 
         // Validate JWT token
         let token_data = decode::<Claims>(
             &auth_header,
-            &DecodingKey::from_secret(JWT_SECRET),
+            &DecodingKey::from_secret(jwt_secret),
             &Validation::default(),
         )
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token").into_response())?;
-
-        // Get app state to access DB
-        let state = parts.extensions.get::<Arc<App>>().ok_or_else(|| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "App state not found").into_response()
-        })?;
+        .map_err(|_| AppError::AuthError(AuthErrorKind::InvalidToken).into_response())?;
 
         // Get user from database
         let user = sqlx::query_as!(
@@ -92,37 +95,29 @@ where
         )
         .fetch_optional(&state.db_pool)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response())?
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not found").into_response())?;
+        .map_err(|e| AppError::Database(e).into_response())?
+        .ok_or_else(|| AppError::AuthError(AuthErrorKind::Unauthorized).into_response())?;
 
         Ok(Self { user })
     }
 }
 
-pub fn create_oauth_client() -> BasicClient {
-    let client_id = ClientId::new(
-        std::env::var("GOOGLE_CLIENT_ID").expect("Missing GOOGLE_CLIENT_ID environment variable."),
-    );
-    let client_secret = ClientSecret::new(
-        std::env::var("GOOGLE_CLIENT_SECRET")
-            .expect("Missing GOOGLE_CLIENT_SECRET environment variable."),
-    );
+pub fn create_oauth_client(app: &App) -> BasicClient {
+    let client_id = ClientId::new(app.config.auth.google_client_id.clone());
+    let client_secret = ClientSecret::new(app.config.auth.google_client_secret.clone());
     let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
         .expect("Invalid authorization endpoint URL");
     let token_url = TokenUrl::new("https://oauth2.googleapis.com/token".to_string())
         .expect("Invalid token endpoint URL");
 
     BasicClient::new(client_id, Some(client_secret), auth_url, Some(token_url)).set_redirect_uri(
-        RedirectUrl::new(format!(
-            "{}/admin/auth/google/callback",
-            std::env::var("APP_URL").expect("Missing APP_URL environment variable")
-        ))
-        .expect("Invalid redirect URL"),
+        RedirectUrl::new(app.config.auth.google_redirect_url.clone())
+            .expect("Invalid redirect URL"),
     )
 }
 
-pub async fn google_login(State(_app): State<App>) -> impl IntoResponse {
-    let client = create_oauth_client();
+pub async fn google_login(State(app): State<App>) -> impl IntoResponse {
+    let client = create_oauth_client(&app);
     let (auth_url, _csrf_token) = client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new("email".to_string()))
@@ -133,8 +128,9 @@ pub async fn google_login(State(_app): State<App>) -> impl IntoResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthCallbackParams {
+pub struct AuthCallbackParams {
     code: String,
+    #[allow(dead_code)]
     state: String,
     // We could add other parameters if needed
 }
@@ -144,12 +140,14 @@ pub async fn google_callback(
     axum::extract::Query(params): axum::extract::Query<AuthCallbackParams>,
 ) -> Result<impl IntoResponse, Response> {
     // Exchange the code with a token
-    let client = create_oauth_client();
+    let client = create_oauth_client(&app);
     let token = client
         .exchange_code(oauth2::AuthorizationCode::new(params.code))
         .request_async(oauth2::reqwest::async_http_client)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Failed to exchange code").into_response())?;
+        .map_err(|e| {
+            AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())).into_response()
+        })?;
 
     // Get user info from Google
     let client = reqwest::Client::new();
@@ -171,12 +169,16 @@ pub async fn google_callback(
                 .into_response()
         })?;
 
-    let _ = user_info["email"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "No email in response").into_response())?;
-    let google_id = user_info["id"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "No id in response").into_response())?;
+    let _ = user_info["email"].as_str().ok_or_else(|| {
+        AppError::AuthError(AuthErrorKind::OAuthError("No ID in user info".to_string()))
+            .into_response()
+    })?;
+    let google_id = user_info["id"].as_str().ok_or_else(|| {
+        AppError::AuthError(AuthErrorKind::OAuthError(
+            "No email in user info".to_string(),
+        ))
+        .into_response()
+    })?;
 
     println!("Google ID: {}", google_id);
     // Check if user exists and is authorized
@@ -187,7 +189,7 @@ pub async fn google_callback(
     )
     .fetch_optional(&app.db_pool)
     .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response())?;
+    .map_err(|e| AppError::Database(e).into_response())?;
 
     let user = match user {
         Some(user) => user,
@@ -202,7 +204,9 @@ pub async fn google_callback(
 
     // Create JWT token
     let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::days(7))
+        .checked_add_signed(chrono::Duration::hours(
+            app.config.auth.jwt_expiry_hours as i64,
+        ))
         .expect("valid timestamp")
         .timestamp() as usize;
 
@@ -215,9 +219,14 @@ pub async fn google_callback(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(JWT_SECRET),
+        &EncodingKey::from_secret(app.config.auth.jwt_secret.as_bytes()),
     )
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create token").into_response())?;
+    .map_err(|_| {
+        AppError::AuthError(AuthErrorKind::OAuthError(
+            "Failed to create token".to_string(),
+        ))
+        .into_response()
+    })?;
 
     // Return token and user info
     Ok(Json(AuthResponse { token, user }))
@@ -672,7 +681,7 @@ pub async fn create_shared_link(
                 // Return success with share link URL
                 return ApiResponse::Success(Some(format!(
                     "{}/s/{}",
-                    app_state.server_config.base_path, share_id
+                    app_state.config.server.host, share_id
                 )));
             }
             Err(e) => {
@@ -689,6 +698,7 @@ pub async fn create_shared_link(
     })
 }
 
+#[allow(dead_code)]
 async fn ws_handler(
     State(app_state): State<App>,
     ws: WebSocketUpgrade,

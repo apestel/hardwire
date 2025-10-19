@@ -65,3 +65,44 @@ After this setup, you can use the admin API to manage other admin users.
 | OTEL_EXPORTER_OTLP_TRACES_PROTOCOL | http/protobuf | OpenTelemetry Traces Protocol |
 | OTEL_EXPORTER_OTLP_TRACES_ENDPOINT | OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318 (protobuf) or http://localhost:4317 | Opentelemetry exporter endpoint |
 | OTEL_RESOURCE_ATTRIBUTES | No default value | service.name=rust-app (you can name it whatever you want) |
+## Recent Architecture Improvements (2024-10-19)
+
+The project has undergone significant architecture improvements. See [IMPROVEMENTS.md](./IMPROVEMENTS.md) for complete details.
+
+### Key Changes:
+
+1. **🔒 Security** - Moved all secrets to environment variables with validation
+   - No more hardcoded `JWT_SECRET`
+   - Required: `JWT_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+   - See `.env.example` for complete configuration
+
+2. **🛠️ Error Handling** - Implemented comprehensive error type system
+   - Type-safe error handling with proper HTTP status codes
+   - Structured JSON error responses
+   - Security-aware (internal errors not exposed to clients)
+
+3. **🧪 Testing** - Added test infrastructure
+   - Test utilities and helpers
+   - Integration tests for core functionality
+   - Easy to extend with new tests
+
+### Quick Start:
+
+```bash
+# 1. Set up environment
+cp .env.example .env
+
+# 2. Generate secure JWT secret
+openssl rand -base64 32
+
+# 3. Edit .env with your values
+nano .env
+
+# 4. Run tests
+cargo test
+
+# 5. Start server
+cargo run -- --server
+```
+
+See [IMPROVEMENTS.md](./IMPROVEMENTS.md) for detailed documentation.
