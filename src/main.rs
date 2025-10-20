@@ -29,8 +29,6 @@ use std::path::PathBuf;
 use askama::Template;
 use axum::body::Body;
 
-extern crate chrono;
-
 type Db = sqlx::SqlitePool;
 
 use axum::extract::{Path, State};
@@ -413,7 +411,7 @@ async fn main() -> Result<()> {
     }
 
     if cli.server {
-        let _ = init_tracing_opentelemetry::tracing_subscriber_ext::init_subscribers()?;
+        let _guard = init_tracing_opentelemetry::TracingConfig::production().init_subscriber()?;
         let mut progress_manager = progress::Manager::new(db_pool.clone());
         // let base_path = "/mnt";
         let indexer = file_indexer::FileIndexer::new(
@@ -506,5 +504,4 @@ async fn shutdown_signal() {
     }
 
     tracing::warn!("signal received, starting graceful shutdown");
-    opentelemetry::global::shutdown_tracer_provider();
 }

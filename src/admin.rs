@@ -19,7 +19,7 @@ use crate::{
     error::{AppError, AuthErrorKind},
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Claims {
     sub: i64, // user id
     exp: usize,
@@ -109,11 +109,14 @@ pub fn create_oauth_client(app: &App) -> BasicClient {
         .expect("Invalid authorization endpoint URL");
     let token_url = TokenUrl::new("https://oauth2.googleapis.com/token".to_string())
         .expect("Invalid token endpoint URL");
+    let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
+        .expect("Invalid redirect URL");
 
-    BasicClient::new(client_id, Some(client_secret), auth_url, Some(token_url)).set_redirect_uri(
-        RedirectUrl::new(app.config.auth.google_redirect_url.clone())
-            .expect("Invalid redirect URL"),
-    )
+    BasicClient::new(client_id)
+        .set_client_secret(client_secret)
+        .set_auth_uri(auth_url)
+        .set_redirect_uri(redirect_url)
+        .set_token_uri(token_url)
 }
 
 pub async fn google_login(State(app): State<App>) -> impl IntoResponse {
@@ -141,9 +144,16 @@ pub async fn google_callback(
 ) -> Result<impl IntoResponse, Response> {
     // Exchange the code with a token
     let client = create_oauth_client(&app);
+
+    let http_client = reqwest::ClientBuilder::new()
+        // Following redirects opens the client up to SSRF vulnerabilities.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("Client should build");
+
     let token = client
         .exchange_code(oauth2::AuthorizationCode::new(params.code))
-        .request_async(oauth2::reqwest::async_http_client)
+        .request(&http_client)
         .await
         .map_err(|e| {
             AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())).into_response()
