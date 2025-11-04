@@ -72,7 +72,7 @@ struct App {
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
     config: Config,
-    pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier)>>>,
+    pending_auths: Arc<Mutex<HashMap<String, Nonce>>>,
 }
 
 impl App {

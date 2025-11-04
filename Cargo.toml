@@ -12,25 +12,25 @@ askama = "0.14.0"
 nanoid = "0.4.0"
 log = "0.4.28"
 pretty_env_logger = "0.5.0"
-console-subscriber = "0.4.1"
+console-subscriber = "0.5.0"
 
 # oauth2 = { version = "5.0.0", features = ["reqwest"] }
 openidconnect = "4.0.1"
 reqwest = { version = "0.12.24", features = ["json"] }
 jsonwebtoken = { version = "10.1.0", features = ["aws_lc_rs"] }
 
-clap = { version = "4.5.50", features = ["derive"] }
+clap = { version = "4.5.51", features = ["derive"] }
 anyhow = "1.0.100"
 tokio = { version = "1.48.0", features = ["full"] }
-tokio-util = "0.7.16"
+tokio-util = "0.7.17"
 tower-http = { version = "0.6.6", features = ["full"] }
 axum = { version = "0.8.6", features = ["ws", "tokio"] }
-axum-extra = "0.10.3"
-axum-tracing-opentelemetry = { version = "0.32.1" }
+axum-extra = "0.12.1"
+axum-tracing-opentelemetry = { version = "0.32.2" }
 url = "2.5.7"
 http = "1.3.1"
 tempfile = "3.23.0"
-sevenz-rust = { version = "0.6.1", features = [ "aes256"] }
+sevenz-rust = { version = "0.6.1", features = ["aes256"] }
 
 # opentelemetry-http = "0.13.0"
 opentelemetry-otlp = { version = "0.31.0", default-features = true }
@@ -43,7 +43,7 @@ tracing-subscriber = { version = "0.3.20", features = [
     "json",
 ] }
 
-init-tracing-opentelemetry = { version = "0.32.1", features = [
+init-tracing-opentelemetry = { version = "0.33.0", features = [
     "tracing_subscriber_ext",
 ] }
 
