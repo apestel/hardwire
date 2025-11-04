@@ -9,10 +9,15 @@ use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer}
 use http::request::Parts as RequestParts;
 
 // use qbittorrent::{data::Torrent, traits::TorrentData, Api};
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tower_http::services::ServeDir;
 use tracing::instrument;
+
+use openidconnect::{Nonce, PkceCodeVerifier};
+
+use std::collections::HashMap;
 
 use clap::{CommandFactory, Parser};
 
@@ -67,6 +72,7 @@ struct App {
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
     config: Config,
+    pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier)>>>,
 }
 
 impl App {
@@ -83,6 +89,7 @@ impl App {
             task_manager,
             indexer,
             config,
+            pending_auths: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

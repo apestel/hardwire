@@ -6,18 +6,47 @@ use axum::{
     routing::{get, post},
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use oauth2::{
-    AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenResponse, TokenUrl,
-    basic::BasicClient,
+use openidconnect::core::{
+    CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClient, CoreClientAuthMethod, CoreGrantType,
+    CoreIdToken, CoreIdTokenClaims, CoreIdTokenVerifier, CoreJsonWebKey,
+    CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm, CoreJwsSigningAlgorithm,
+    CoreResponseMode, CoreResponseType, CoreRevocableToken, CoreSubjectIdentifierType,
+};
+use openidconnect::{
+    AdditionalProviderMetadata, AuthUrl, AuthenticationFlow, AuthorizationCode, ClientAuthMethod,
+    ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields, IssuerUrl, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, ProviderMetadata, RedirectUrl, RevocationUrl, Scope, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{fmt::Debug, sync::Arc};
 use tokio::net::unix::SocketAddr;
+use tower_http::auth;
 
 use crate::{
     App,
     error::{AppError, AuthErrorKind},
 };
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RevocationEndpointProviderMetadata {
+    revocation_endpoint: String,
+}
+impl AdditionalProviderMetadata for RevocationEndpointProviderMetadata {}
+type GoogleProviderMetadata = ProviderMetadata<
+    CoreAuthDisplay,
+    CoreClientAuthMethod,
+    CoreClaimName,
+    CoreClaimType,
+    CoreGrantType,
+    CoreJwsSigningAlgorithm,
+    CoreJsonWebKey,
+    CoreJweKeyManagementAlgorithm,
+    CoreJweContentEncryptionAlgorithm,
+    CoreResponseMode,
+    CoreResponseType,
+    CoreSubjectIdentifierType,
+>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Claims {
@@ -102,144 +131,38 @@ where
     }
 }
 
-pub fn create_oauth_client(app: &App) -> BasicClient {
+async fn create_oidc_client(app: &App) -> Result<CoreClient, AppError> {
     let client_id = ClientId::new(app.config.auth.google_client_id.clone());
     let client_secret = ClientSecret::new(app.config.auth.google_client_secret.clone());
-    let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
-        .expect("Invalid authorization endpoint URL");
-    let token_url = TokenUrl::new("https://oauth2.googleapis.com/token".to_string())
-        .expect("Invalid token endpoint URL");
+    let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
+        .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
-        .expect("Invalid redirect URL");
+        .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
 
-    BasicClient::new(client_id)
-        .set_client_secret(client_secret)
-        .set_auth_uri(auth_url)
-        .set_redirect_uri(redirect_url)
-        .set_token_uri(token_url)
-}
-
-pub async fn google_login(State(app): State<App>) -> impl IntoResponse {
-    let client = create_oauth_client(&app);
-    let (auth_url, _csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new("email".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
-        .url();
-
-    axum::response::Redirect::to(auth_url.as_str())
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AuthCallbackParams {
-    code: String,
-    #[allow(dead_code)]
-    state: String,
-    // We could add other parameters if needed
-}
-
-pub async fn google_callback(
-    State(app): State<App>,
-    axum::extract::Query(params): axum::extract::Query<AuthCallbackParams>,
-) -> Result<impl IntoResponse, Response> {
-    // Exchange the code with a token
-    let client = create_oauth_client(&app);
-
-    let http_client = reqwest::ClientBuilder::new()
-        // Following redirects opens the client up to SSRF vulnerabilities.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("Client should build");
-
-    let token = client
-        .exchange_code(oauth2::AuthorizationCode::new(params.code))
-        .request(&http_client)
+    // Discover Google's OIDC metadata (cached or per-request; here per-request for simplicity)
+    let provider_metadata = GoogleProviderMetadata::discover_async(&issuer_url, async_http_client)
         .await
-        .map_err(|e| {
-            AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())).into_response()
-        })?;
+        .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
 
-    // Get user info from Google
-    let client = reqwest::Client::new();
-    let user_info: serde_json::Value = client
-        .get("https://www.googleapis.com/oauth2/v2/userinfo")
-        .bearer_auth(token.access_token().secret())
-        .send()
-        .await
-        .map_err(|_| {
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get user info").into_response()
-        })?
-        .json()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to parse user info",
-            )
-                .into_response()
-        })?;
-
-    let _ = user_info["email"].as_str().ok_or_else(|| {
-        AppError::AuthError(AuthErrorKind::OAuthError("No ID in user info".to_string()))
-            .into_response()
-    })?;
-    let google_id = user_info["id"].as_str().ok_or_else(|| {
-        AppError::AuthError(AuthErrorKind::OAuthError(
-            "No email in user info".to_string(),
-        ))
-        .into_response()
-    })?;
-
-    println!("Google ID: {}", google_id);
-    // Check if user exists and is authorized
-    let user = sqlx::query_as!(
-        AdminUser,
-        "SELECT * FROM admin_users WHERE google_id = ?",
-        google_id
+    // Create the OIDC client
+    let mut client = CoreClient::from_provider_metadata(
+        provider_metadata.clone(), // Clone to avoid move issues
+        client_id,
+        Some(client_secret),
     )
-    .fetch_optional(&app.db_pool)
-    .await
-    .map_err(|e| AppError::Database(e).into_response())?;
+    .set_redirect_uri(redirect_url);
 
-    let user = match user {
-        Some(user) => user,
-        None => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "You are not authorized to access this area",
-            )
-                .into_response());
-        }
-    };
+    // Set revocation URL (from discovered metadata)
+    let revocation_endpoint = provider_metadata
+        .additional_metadata()
+        .revocation_endpoint
+        .clone();
+    client = client.set_revocation_uri(
+        RevocationUrl::new(revocation_endpoint)
+            .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?,
+    );
 
-    // Create JWT token
-    let expiration = chrono::Utc::now()
-        .checked_add_signed(chrono::Duration::hours(
-            app.config.auth.jwt_expiry_hours as i64,
-        ))
-        .expect("valid timestamp")
-        .timestamp() as usize;
-
-    let claims = Claims {
-        sub: user.id,
-        exp: expiration,
-        email: user.email.clone(),
-    };
-
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(app.config.auth.jwt_secret.as_bytes()),
-    )
-    .map_err(|_| {
-        AppError::AuthError(AuthErrorKind::OAuthError(
-            "Failed to create token".to_string(),
-        ))
-        .into_response()
-    })?;
-
-    // Return token and user info
-    Ok(Json(AuthResponse { token, user }))
+    Ok(client)
 }
 
 #[derive(Debug, Serialize)]
