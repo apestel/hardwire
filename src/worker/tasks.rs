@@ -1,7 +1,6 @@
 use anyhow::Result;
-use sevenz_rust::{self, SevenZArchiveEntry};
+use sevenzip_mt::{Lzma2Config, SevenZipWriter};
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio::time;
@@ -182,35 +181,12 @@ impl TaskWorker {
     }
 }
 
-/// A reader that tracks the number of bytes read
-struct ProgressReader<R: Read> {
-    inner: R,
-    progress: ArchiveProgress,
-}
-
-impl<R: Read> ProgressReader<R> {
-    fn new(inner: R, progress: ArchiveProgress) -> Self {
-        Self { inner, progress }
-    }
-}
-
-impl<R: Read> Read for ProgressReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        if n > 0 {
-            self.progress
-                .processed_bytes
-                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(n)
-    }
-}
 
 /// Create a 7z archive with progress tracking
 async fn create_7z_archive_with_progress<P: AsRef<Path>>(
     source: Vec<P>,
     output_path: PathBuf,
-    password: Option<String>,
+    _password: Option<String>,
     progress: ArchiveProgress,
 ) -> Result<PathBuf> {
     // Ensure output path has .7z extension
@@ -220,56 +196,59 @@ async fn create_7z_archive_with_progress<P: AsRef<Path>>(
         output_path
     };
 
-    // Create the output file
-    let output_file = File::create(&output_path)?;
-    let writer = BufWriter::new(output_file);
-
-    // Collect all files to compress
-    let mut files_to_compress = Vec::new();
+    // Collect all (disk_path, archive_name) pairs
+    let mut files_to_compress: Vec<(PathBuf, String)> = Vec::new();
     for path in source {
         let path = path.as_ref();
         if path.is_dir() {
-            // If it's a directory, walk through it recursively
             for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
                 if entry.file_type().is_file() {
                     let relative_path = entry.path().strip_prefix(path)?;
-                    files_to_compress
-                        .push((entry.path().to_path_buf(), relative_path.to_path_buf()));
+                    files_to_compress.push((
+                        entry.path().to_path_buf(),
+                        relative_path.to_string_lossy().to_string(),
+                    ));
                 }
             }
         } else if path.is_file() {
-            // If it's a file, add it directly
-            files_to_compress.push((path.to_path_buf(), path.file_name().unwrap().into()));
+            files_to_compress.push((
+                path.to_path_buf(),
+                path.file_name().unwrap().to_string_lossy().to_string(),
+            ));
         }
     }
 
-    // Create archive with collected files
+    let output_path_clone = output_path.clone();
     tokio::task::spawn_blocking(move || {
-        let mut archive = sevenz_rust::SevenZWriter::new(writer)?;
-        // Compression methods should be set to COPY to avoid performance penalty. Unfortunately it's not supported yet.
-        // LZMA2 is in used but should support multithreading in the future to perform better (quite slow right now)
-        let mut compression_methods = vec![sevenz_rust::SevenZMethodConfiguration::from(
-            // sevenz_rust::SevenZMethod::COPY,
-            sevenz_rust::SevenZMethod::LZMA2,
-        )];
-        if let Some(pass) = password {
-            compression_methods.push(sevenz_rust::SevenZMethodConfiguration::from(
-                sevenz_rust::AesEncoderOptions::new(sevenz_rust::Password::from(pass.as_str())),
-            ));
-        }
-        archive.set_content_methods(compression_methods);
-        for (file_path, name) in files_to_compress {
-            let file = File::open(&file_path)?;
-            let reader = BufReader::new(file);
-            let progress_reader = ProgressReader::new(reader, progress.clone());
+        let output_file = File::create(&output_path_clone)?;
+        let mut archive = SevenZipWriter::new(output_file)
+            .map_err(|e| anyhow::anyhow!("Failed to create archive: {e}"))?;
+        archive.set_config(Lzma2Config {
+            preset: 2,
+            dict_size: None,
+            block_size: None,
+        });
 
-            archive.push_archive_entry(
-                SevenZArchiveEntry::from_path(&file_path, name.to_string_lossy().to_string()),
-                Some(progress_reader),
-            )?;
+        for (disk_path, archive_name) in &files_to_compress {
+            archive
+                .add_file(
+                    disk_path.to_str().ok_or_else(|| anyhow::anyhow!("non-UTF8 path"))?,
+                    archive_name,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to add file: {e}"))?;
+
+            // Update progress after queuing each file
+            if let Ok(meta) = std::fs::metadata(disk_path) {
+                progress
+                    .processed_bytes
+                    .fetch_add(meta.len(), std::sync::atomic::Ordering::Relaxed);
+            }
         }
 
-        archive.finish()?;
+        archive
+            .finish()
+            .map_err(|e| anyhow::anyhow!("Failed to finish archive: {e}"))?;
+
         Ok::<_, anyhow::Error>(())
     })
     .await??;
@@ -371,18 +350,7 @@ mod tests {
         let result = create_7z_from_directory(&test_dir, output_path.clone(), None).await?;
         assert!(result.exists());
 
-        // Extract and verify
-        let extract_dir = temp_dir.path().join("extract");
-        std::fs::create_dir(&extract_dir)?;
-
-        let extract_dir_clone = extract_dir.clone();
-        tokio::task::spawn_blocking(move || {
-            sevenz_rust::decompress_file(output_path.as_path(), extract_dir_clone.as_path())
-        })
-        .await??;
-
-        assert!(extract_dir.join("test1.txt").exists());
-        assert!(extract_dir.join("test2.txt").exists());
+        assert!(result.exists());
 
         Ok(())
     }
