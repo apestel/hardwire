@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT output_data, status FROM tasks WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "output_data",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "c31c543a3354d6c18371d7240ba17e51529043f1cf65d3410962fbe6fec879cc"
+}

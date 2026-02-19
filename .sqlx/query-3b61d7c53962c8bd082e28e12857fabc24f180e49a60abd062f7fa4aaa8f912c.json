@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        INSERT INTO admin_users (email, google_id, created_at) VALUES (?, '', ?) RETURNING *\n        ",
+  "query": "SELECT * FROM admin_users WHERE email = ?",
   "describe": {
     "columns": [
       {
@@ -25,7 +25,7 @@
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 1
     },
     "nullable": [
       false,
@@ -34,5 +34,5 @@
       false
     ]
   },
-  "hash": "cd2310b8f6de159d278060fba4199190e47a7fd01e788f4e11ae7d233079104c"
+  "hash": "3b61d7c53962c8bd082e28e12857fabc24f180e49a60abd062f7fa4aaa8f912c"
 }

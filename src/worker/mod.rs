@@ -58,6 +58,7 @@ pub struct Task {
     pub finished_at: Option<i64>,
     pub error: Option<String>,
     pub progress: i32,
+    pub archive_path: Option<String>,
 }
 
 #[derive(Default)]
@@ -118,14 +119,15 @@ impl TaskManager {
     pub async fn get_task_status(&self, task_id: &str) -> Result<Task> {
         let task = sqlx::query!(
             r#"
-            SELECT 
+            SELECT
                 id,
                 status as "status: TaskStatus",
                 created_at,
                 started_at,
                 finished_at,
                 error,
-                COALESCE(progress, 0) as "progress!: i32"
+                COALESCE(progress, 0) as "progress!: i32",
+                output_data
             FROM tasks
             WHERE id = ?
             "#,
@@ -133,6 +135,12 @@ impl TaskManager {
         )
         .fetch_one(&self.db)
         .await?;
+
+        let archive_path = task
+            .output_data
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v["archive_path"].as_str().map(|s| s.to_owned()));
 
         Ok(Task {
             id: task.id,
@@ -142,6 +150,7 @@ impl TaskManager {
             finished_at: task.finished_at,
             error: task.error,
             progress: task.progress,
+            archive_path,
         })
     }
 

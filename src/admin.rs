@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
-    extract::{FromRequestParts, Path, Query, State, WebSocketUpgrade, ws::WebSocket},
-    http::{StatusCode, request::Parts},
+    body::Body,
+    extract::{FromRef, FromRequestParts, Path, Query, State, WebSocketUpgrade, ws::WebSocket},
+    http::{HeaderMap, StatusCode, request::Parts},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -9,20 +10,26 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    RedirectUrl, Scope, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
+use tokio_util::codec::{BytesCodec, FramedRead};
 
-use std::{fmt::Debug, sync::Arc};
+use std::fmt::Debug;
 
 use crate::{
     App,
     error::{AppError, AuthErrorKind},
+    worker,
 };
+
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH};
+
+// ─── Auth types ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: i64, // user id
+    sub: i64,
     exp: usize,
     email: String,
 }
@@ -40,11 +47,8 @@ pub struct AdminUserCreate {
     pub email: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct AuthResponse {
-    token: String,
-    user: AdminUser,
-}
+
+// ─── Auth middleware ─────────────────────────────────────────────────────────
 
 pub struct AdminAuthMiddleware {
     #[allow(dead_code)]
@@ -53,12 +57,12 @@ pub struct AdminAuthMiddleware {
 
 impl<S> FromRequestParts<S> for AdminAuthMiddleware
 where
+    App: axum::extract::FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = Response;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Get the Authorization header
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_header = parts
             .headers
             .get("Authorization")
@@ -72,15 +76,10 @@ where
             })
             .ok_or_else(|| AppError::AuthError(AuthErrorKind::MissingToken).into_response())?;
 
-        // Get app state to access DB
-        let state = parts.extensions.get::<Arc<App>>().ok_or_else(|| {
-            AppError::Internal(anyhow::anyhow!("App state not found")).into_response()
-        })?;
+        let app = App::from_ref(state);
+        let jwt_secret = app.config.auth.jwt_secret.clone();
+        let jwt_secret = jwt_secret.as_bytes();
 
-        // Get JWT secret from config
-        let jwt_secret = state.config.auth.jwt_secret.as_bytes();
-
-        // Validate JWT token
         let token_data = decode::<Claims>(
             &auth_header,
             &DecodingKey::from_secret(jwt_secret),
@@ -88,13 +87,12 @@ where
         )
         .map_err(|_| AppError::AuthError(AuthErrorKind::InvalidToken).into_response())?;
 
-        // Get user from database
         let user = sqlx::query_as!(
             AdminUser,
             "SELECT * FROM admin_users WHERE id = ?",
             token_data.claims.sub
         )
-        .fetch_optional(&state.db_pool)
+        .fetch_optional(&app.db_pool)
         .await
         .map_err(|e| AppError::Database(e).into_response())?
         .ok_or_else(|| AppError::AuthError(AuthErrorKind::Unauthorized).into_response())?;
@@ -103,6 +101,8 @@ where
     }
 }
 
+// ─── OAuth ───────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 pub struct AuthCallbackQuery {
     code: String,
@@ -110,7 +110,6 @@ pub struct AuthCallbackQuery {
 }
 
 pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> {
-    // Build HTTP client with no redirects to prevent SSRF
     let http_client = reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -123,7 +122,6 @@ pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> 
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
         .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
 
-    // Discover Google's OIDC metadata
     let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
         .map_err(|e| {
@@ -133,15 +131,12 @@ pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> 
             )))
         })?;
 
-    // Create the OIDC client from provider metadata
     let client =
         CoreClient::from_provider_metadata(provider_metadata, client_id, Some(client_secret))
             .set_redirect_uri(redirect_url);
 
-    // Generate PKCE challenge
-    let (pkce_challenge, _pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-    // Generate the authorization URL
     let (auth_url, csrf_token, nonce) = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
@@ -154,9 +149,8 @@ pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> 
         .set_pkce_challenge(pkce_challenge)
         .url();
 
-    // Store PKCE verifier and nonce for later verification
     let mut pending_auths = app.pending_auths.lock().await;
-    pending_auths.insert(csrf_token.secret().clone(), nonce);
+    pending_auths.insert(csrf_token.secret().clone(), (nonce, pkce_verifier));
 
     Ok(Redirect::to(auth_url.as_str()))
 }
@@ -164,8 +158,7 @@ pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> 
 pub async fn google_callback(
     State(app): State<App>,
     Query(query): Query<AuthCallbackQuery>,
-) -> Result<Json<AuthResponse>, AppError> {
-    // Build HTTP client with no redirects to prevent SSRF
+) -> Result<Redirect, AppError> {
     let http_client = reqwest::ClientBuilder::new()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -178,7 +171,6 @@ pub async fn google_callback(
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
         .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
 
-    // Discover Google's OIDC metadata
     let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
         .map_err(|e| {
@@ -188,22 +180,26 @@ pub async fn google_callback(
             )))
         })?;
 
-    // Create the OIDC client from provider metadata
     let client =
         CoreClient::from_provider_metadata(provider_metadata, client_id, Some(client_secret))
             .set_redirect_uri(redirect_url);
 
-    // Retrieve and remove the stored nonce and PKCE verifier
-    let nonce = {
+    let (nonce, pkce_verifier) = {
         let mut pending_auths = app.pending_auths.lock().await;
         pending_auths
             .remove(&query.state)
             .ok_or_else(|| AppError::AuthError(AuthErrorKind::InvalidToken))?
     };
 
-    // Exchange the authorization code for an access token
     let token_response = client
-        .exchange_code(AuthorizationCode::new(query.code)).map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(format!("Exchange code error: {:?}", e))))?
+        .exchange_code(AuthorizationCode::new(query.code))
+        .map_err(|e| {
+            AppError::AuthError(AuthErrorKind::OAuthError(format!(
+                "Exchange code error: {:?}",
+                e
+            )))
+        })?
+        .set_pkce_verifier(pkce_verifier)
         .request_async(&http_client)
         .await
         .map_err(|e| {
@@ -213,7 +209,6 @@ pub async fn google_callback(
             )))
         })?;
 
-    // Extract and verify ID token
     let id_token = token_response
         .id_token()
         .ok_or_else(|| AppError::AuthError(AuthErrorKind::OAuthError("No ID token".to_string())))?;
@@ -226,7 +221,6 @@ pub async fn google_callback(
         )))
     })?;
 
-    // Extract user information
     let google_id = claims.subject().to_string();
     let email = claims
         .email()
@@ -235,7 +229,6 @@ pub async fn google_callback(
             AppError::AuthError(AuthErrorKind::OAuthError("No email in claims".to_string()))
         })?;
 
-    // Check if user exists, or create new user
     let user = sqlx::query_as!(
         AdminUser,
         "SELECT * FROM admin_users WHERE google_id = ?",
@@ -248,7 +241,6 @@ pub async fn google_callback(
     let user = match user {
         Some(u) => u,
         None => {
-            // Create new user
             let now = chrono::Utc::now().timestamp();
             sqlx::query!(
                 "INSERT INTO admin_users (email, google_id, created_at) VALUES (?, ?, ?)",
@@ -271,7 +263,6 @@ pub async fn google_callback(
         }
     };
 
-    // Generate JWT token
     let jwt_secret = app.config.auth.jwt_secret.as_bytes();
     let exp = (chrono::Utc::now() + chrono::Duration::days(7)).timestamp() as usize;
     let jwt_claims = Claims {
@@ -287,27 +278,251 @@ pub async fn google_callback(
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to generate token: {}", e)))?;
 
-    Ok(Json(AuthResponse { token, user }))
+    // JWT uses base64url encoding — no special URL encoding needed
+    Ok(Redirect::to(&format!("/admin/auth/done?token={}", token)))
+}
+
+// ─── User management ─────────────────────────────────────────────────────────
+
+pub async fn list_users(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+) -> Result<Json<Vec<AdminUser>>, AppError> {
+    let users = sqlx::query_as!(AdminUser, "SELECT * FROM admin_users")
+        .fetch_all(&app.db_pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(Json(users))
+}
+
+pub async fn create_user(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Json(user_create): Json<AdminUserCreate>,
+) -> Result<Json<AdminUser>, AppError> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query!(
+        "INSERT INTO admin_users (email, google_id, created_at) VALUES (?, ?, ?)",
+        user_create.email,
+        "",
+        now
+    )
+    .execute(&app.db_pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let user = sqlx::query_as!(
+        AdminUser,
+        "SELECT * FROM admin_users WHERE email = ?",
+        user_create.email
+    )
+    .fetch_one(&app.db_pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    Ok(Json(user))
+}
+
+pub async fn get_user(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Path(id): Path<i64>,
+) -> Result<Json<AdminUser>, AppError> {
+    let user = sqlx::query_as!(AdminUser, "SELECT * FROM admin_users WHERE id = ?", id)
+        .fetch_optional(&app.db_pool)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("User not found")))?;
+    Ok(Json(user))
+}
+
+pub async fn delete_user(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    sqlx::query!("DELETE FROM admin_users WHERE id = ?", id)
+        .execute(&app.db_pool)
+        .await
+        .map_err(AppError::Database)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Tasks ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct CreateTaskResponse {
+    task_id: String,
+}
+
+pub async fn create_task(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Json(input): Json<worker::TaskInput>,
+) -> Result<Json<CreateTaskResponse>, AppError> {
+    let task_id = app
+        .task_manager
+        .create_task(input)
+        .await
+        .map_err(|e| AppError::TaskError(e.to_string()))?;
+    Ok(Json(CreateTaskResponse { task_id }))
+}
+
+pub async fn get_task_status(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Path(task_id): Path<String>,
+) -> Result<Json<worker::Task>, AppError> {
+    let task = app
+        .task_manager
+        .get_task_status(&task_id)
+        .await
+        .map_err(|e| AppError::TaskError(e.to_string()))?;
+    Ok(Json(task))
+}
+
+pub async fn download_task_output(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Path(task_id): Path<String>,
+) -> Result<Response, AppError> {
+    let row = sqlx::query!(
+        "SELECT output_data, status FROM tasks WHERE id = ?",
+        task_id
+    )
+    .fetch_optional(&app.db_pool)
+    .await
+    .map_err(AppError::Database)?
+    .ok_or_else(|| AppError::TaskError("Task not found".to_string()))?;
+
+    if row.status != "completed" {
+        return Err(AppError::TaskError("Task not yet completed".to_string()));
+    }
+
+    let output: serde_json::Value =
+        serde_json::from_str(row.output_data.as_deref().unwrap_or("{}"))
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+
+    let archive_path = output["archive_path"]
+        .as_str()
+        .ok_or_else(|| AppError::TaskError("No archive_path in output".to_string()))?
+        .to_owned();
+
+    let file = tokio::fs::File::open(&archive_path)
+        .await
+        .map_err(AppError::FileSystem)?;
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(AppError::FileSystem)?
+        .len();
+
+    let filename = std::path::Path::new(&archive_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("archive.7z")
+        .to_owned();
+
+    let stream = FramedRead::new(file, BytesCodec::new());
+    let body = Body::from_stream(stream);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, file_size.to_string().parse().unwrap());
+    headers.insert(
+        CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename)
+            .parse()
+            .unwrap(),
+    );
+
+    Ok((headers, body).into_response())
+}
+
+// ─── File listing ────────────────────────────────────────────────────────────
+
+pub async fn list_files(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+) -> Result<Json<Vec<crate::file_indexer::FileInfo>>, AppError> {
+    let files = app
+        .indexer
+        .files
+        .lock()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("FileIndexer lock poisoned")))?;
+    Ok(Json(files.clone().unwrap_or_default()))
+}
+
+// ─── Share links ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSharedLinkRequest {
+    file_path: String,
+    expires_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(untagged)]
-pub enum ApiResponse<T> {
-    Success(T),
-    Error(ApiError),
+pub struct SharedLinkResponse {
+    id: String,
+    url: String,
+    expires_at: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
-pub struct DownloadRecord {
-    pub id: i64,
-    pub file_path: String,
-    pub ip_address: String,
-    pub transaction_id: String,
-    pub status: String,
-    pub file_size: Option<i64>,
-    pub started_at: i64,
-    pub finished_at: Option<i64>,
+pub async fn create_shared_link(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+    Json(request): Json<CreateSharedLinkRequest>,
+) -> Result<Json<SharedLinkResponse>, AppError> {
+    let path = &request.file_path;
+
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| AppError::FileNotFound(path.clone()))?;
+    let file_size = metadata.len() as i64;
+
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = request.expires_at.unwrap_or(now + 86400 * 7);
+
+    let file_id = sqlx::query!(
+        "INSERT INTO files (sha256, path, file_size) VALUES (?, ?, ?)",
+        "",
+        path,
+        file_size
+    )
+    .execute(&app.db_pool)
+    .await
+    .map_err(AppError::Database)?
+    .last_insert_rowid();
+
+    let share_id = nanoid::nanoid!(10);
+    sqlx::query!(
+        "INSERT INTO share_links (id, expiration, created_at) VALUES (?, ?, ?)",
+        share_id,
+        expires_at,
+        now
+    )
+    .execute(&app.db_pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    sqlx::query!(
+        "INSERT INTO share_link_files (share_link_id, file_id) VALUES (?, ?)",
+        share_id,
+        file_id
+    )
+    .execute(&app.db_pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let url = format!("{}/s/{}", app.config.server.host, share_id);
+
+    Ok(Json(SharedLinkResponse {
+        id: share_id,
+        url,
+        expires_at: Some(expires_at),
+    }))
 }
+
+// ─── Statistics ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct DownloadStats {
@@ -338,120 +553,16 @@ pub struct PeriodQuery {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ApiError {
-    error_type: String,
-    error_message: String,
+pub struct StatusDistribution {
+    status: String,
+    count: i64,
+    percentage: f64,
 }
 
-impl<T: Serialize> IntoResponse for ApiResponse<T> {
-    fn into_response(self) -> Response {
-        match self {
-            ApiResponse::Success(data) => (StatusCode::OK, Json(data)).into_response(),
-            ApiResponse::Error(error) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response()
-            }
-        }
-    }
-}
-
-impl From<anyhow::Error> for ApiError {
-    fn from(err: anyhow::Error) -> Self {
-        ApiError {
-            error_type: "InternalError".to_string(),
-            error_message: err.to_string(),
-        }
-    }
-}
-
-impl From<sqlx::Error> for ApiError {
-    fn from(err: sqlx::Error) -> Self {
-        ApiError {
-            error_type: "DatabaseError".to_string(),
-            error_message: err.to_string(),
-        }
-    }
-}
-
-pub async fn list_users(State(app): State<App>) -> Result<Json<Vec<AdminUser>>, AppError> {
-    let users = sqlx::query_as!(AdminUser, "SELECT * FROM admin_users")
-        .fetch_all(&app.db_pool)
-        .await
-        .map_err(AppError::Database)?;
-
-    Ok(Json(users))
-}
-
-pub async fn create_user(
+pub async fn download_stats(
+    _auth: AdminAuthMiddleware,
     State(app): State<App>,
-    Json(user_create): Json<AdminUserCreate>,
-) -> Result<Json<AdminUser>, AppError> {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query!(
-        "INSERT INTO admin_users (email, google_id, created_at) VALUES (?, ?, ?)",
-        user_create.email,
-        "",
-        now
-    )
-    .execute(&app.db_pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    let user = sqlx::query_as!(
-        AdminUser,
-        "SELECT * FROM admin_users WHERE email = ?",
-        user_create.email
-    )
-    .fetch_one(&app.db_pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    Ok(Json(user))
-}
-
-pub async fn get_user(
-    State(app): State<App>,
-    Path(id): Path<i64>,
-) -> Result<Json<AdminUser>, AppError> {
-    let user = sqlx::query_as!(AdminUser, "SELECT * FROM admin_users WHERE id = ?", id)
-        .fetch_optional(&app.db_pool)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("User not found")))?;
-
-    Ok(Json(user))
-}
-
-pub async fn delete_user(
-    State(app): State<App>,
-    Path(id): Path<i64>,
-) -> Result<StatusCode, AppError> {
-    sqlx::query!("DELETE FROM admin_users WHERE id = ?", id)
-        .execute(&app.db_pool)
-        .await
-        .map_err(AppError::Database)?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-pub async fn create_task(State(_app): State<App>) -> Result<String, AppError> {
-    // Placeholder implementation
-    Ok("Task created".to_string())
-}
-
-pub async fn get_task_status(
-    State(_app): State<App>,
-    Path(_task_id): Path<String>,
-) -> Result<String, AppError> {
-    // Placeholder implementation
-    Ok("Task status".to_string())
-}
-
-pub async fn list_files(State(_app): State<App>) -> Result<Json<Vec<String>>, AppError> {
-    // Placeholder implementation
-    Ok(Json(vec![]))
-}
-
-pub async fn download_stats(State(app): State<App>) -> Result<Json<DownloadStats>, AppError> {
+) -> Result<Json<DownloadStats>, AppError> {
     let total_downloads: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM download")
         .fetch_one(&app.db_pool)
         .await
@@ -493,6 +604,7 @@ pub async fn download_stats(State(app): State<App>) -> Result<Json<DownloadStats
 }
 
 pub async fn download_stats_by_period(
+    _auth: AdminAuthMiddleware,
     State(app): State<App>,
     Query(query): Query<PeriodQuery>,
 ) -> Result<Json<DownloadsByPeriod>, AppError> {
@@ -534,6 +646,7 @@ pub async fn download_stats_by_period(
 }
 
 pub async fn recent_downloads(
+    _auth: AdminAuthMiddleware,
     State(app): State<App>,
     Query(query): Query<PeriodQuery>,
 ) -> Result<Json<Vec<DownloadRecord>>, AppError> {
@@ -550,14 +663,8 @@ pub async fn recent_downloads(
     Ok(Json(downloads))
 }
 
-#[derive(Debug, Serialize)]
-pub struct StatusDistribution {
-    status: String,
-    count: i64,
-    percentage: f64,
-}
-
 pub async fn download_status_distribution(
+    _auth: AdminAuthMiddleware,
     State(app): State<App>,
 ) -> Result<Json<Vec<StatusDistribution>>, AppError> {
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM download")
@@ -588,78 +695,108 @@ pub async fn download_status_distribution(
     Ok(Json(distribution))
 }
 
+// ─── Download records ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DownloadRecord {
+    pub id: i64,
+    pub file_path: String,
+    pub ip_address: String,
+    pub transaction_id: String,
+    pub status: String,
+    pub file_size: Option<i64>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+// ─── WebSocket live updates ──────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
-pub struct CreateSharedLinkRequest {
-    file_path: String,
-    expires_at: Option<i64>,
+pub struct WsQuery {
+    token: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SharedLinkResponse {
-    id: String,
-    url: String,
-    expires_at: Option<i64>,
-}
-
-pub async fn create_shared_link(
+async fn ws_handler(
+    ws: WebSocketUpgrade,
     State(app): State<App>,
-    Json(request): Json<CreateSharedLinkRequest>,
-) -> Result<Json<SharedLinkResponse>, AppError> {
-    let id = nanoid::nanoid!();
-    let now = chrono::Utc::now().timestamp();
-    let expires_at = request.expires_at.unwrap_or(now + 86400 * 7); // 7 days default
+    Query(query): Query<WsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let token = query
+        .token
+        .ok_or_else(|| AppError::AuthError(AuthErrorKind::MissingToken))?;
 
-    sqlx::query("INSERT INTO share_links (id, expiration, created_at) VALUES (?, ?, ?)")
-        .bind(&id)
-        .bind(expires_at)
-        .bind(now)
-        .execute(&app.db_pool)
-        .await
-        .map_err(AppError::Database)?;
+    let jwt_secret = app.config.auth.jwt_secret.as_bytes();
+    decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(jwt_secret),
+        &Validation::default(),
+    )
+    .map_err(|_| AppError::AuthError(AuthErrorKind::InvalidToken))?;
 
-    let url = format!("{}/shared/{}", app.config.server.host, id);
-
-    Ok(Json(SharedLinkResponse {
-        id,
-        url,
-        expires_at: Some(expires_at),
-    }))
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, app)))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(_app): State<App>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_socket(socket))
-}
+async fn handle_socket(mut socket: WebSocket, app: App) {
+    use axum::extract::ws::Message;
+    use tokio::sync::broadcast::error::RecvError;
 
-async fn handle_socket(mut socket: WebSocket) {
-    while let Some(msg) = socket.recv().await {
-        if let Ok(msg) = msg {
-            if socket.send(msg).await.is_err() {
-                break;
+    let mut rx = app.progress_channel_sender.subscribe();
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            if socket.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => continue,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
             }
         }
     }
 }
 
+// ─── File rescan ─────────────────────────────────────────────────────────────
+
+pub async fn rescan_files(
+    _auth: AdminAuthMiddleware,
+    State(app): State<App>,
+) -> Result<StatusCode, AppError> {
+    app.indexer
+        ._signal_index_updater
+        .send(())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to trigger rescan: {}", e)))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Router ──────────────────────────────────────────────────────────────────
+
 pub fn admin_router() -> Router<App> {
     Router::new()
         .route("/auth/google/login", get(google_login))
         .route("/auth/google/callback", get(google_callback))
+        .route("/live_update", get(ws_handler))
         .route("/api/users", get(list_users).post(create_user))
-        .route("/api/users/:id", get(get_user).delete(delete_user))
+        .route("/api/users/{id}", get(get_user).delete(delete_user))
         .route("/api/tasks", post(create_task))
-        .route("/api/tasks/:task_id", get(get_task_status))
-        // .route("/live_update", get(ws_handler))
+        .route("/api/tasks/{task_id}", get(get_task_status))
+        .route("/api/tasks/{task_id}/download", get(download_task_output))
         .route("/api/list_files", get(list_files))
+        .route("/api/files/rescan", post(rescan_files))
         .route("/api/create_shared_link", post(create_shared_link))
-        // Nouvelles routes pour les statistiques de téléchargement
         .route("/api/stats/downloads", get(download_stats))
-        .route(
-            "/api/stats/downloads/by_period",
-            get(download_stats_by_period),
-        )
+        .route("/api/stats/downloads/by_period", get(download_stats_by_period))
         .route("/api/stats/downloads/recent", get(recent_downloads))
-        .route(
-            "/api/stats/downloads/status",
-            get(download_status_distribution),
-        )
+        .route("/api/stats/downloads/status", get(download_status_distribution))
 }

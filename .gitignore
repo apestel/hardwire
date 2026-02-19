@@ -1,2 +1,6 @@
 /target
 .aider*
+/data
+/dist/admin/
+/frontend/node_modules/
+/frontend/.svelte-kit/

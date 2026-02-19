@@ -12,6 +12,7 @@ use super::{TaskInput, TaskManager, TaskStatus};
 pub struct TaskWorker {
     task_manager: TaskManager,
     task_receiver: mpsc::Receiver<String>,
+    data_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -43,10 +44,11 @@ impl ArchiveProgress {
 }
 
 impl TaskWorker {
-    pub fn new(task_manager: TaskManager, task_receiver: mpsc::Receiver<String>) -> Self {
+    pub fn new(task_manager: TaskManager, task_receiver: mpsc::Receiver<String>, data_dir: PathBuf) -> Self {
         Self {
             task_manager,
             task_receiver,
+            data_dir,
         }
     }
 
@@ -123,10 +125,17 @@ impl TaskWorker {
                     }
                 });
 
+                // Resolve output_path relative to data_dir if it's not absolute
+                let output_path = if archive_input.output_path.is_absolute() {
+                    archive_input.output_path.clone()
+                } else {
+                    self.data_dir.join(&archive_input.output_path)
+                };
+
                 let result = if let Some(dir) = archive_input.directory {
                     create_7z_archive_with_progress(
                         vec![dir],
-                        archive_input.output_path,
+                        output_path,
                         archive_input.password,
                         progress.clone(),
                     )
@@ -134,7 +143,7 @@ impl TaskWorker {
                 } else if let Some(files) = archive_input.files {
                     create_7z_archive_with_progress(
                         files,
-                        archive_input.output_path,
+                        output_path,
                         archive_input.password,
                         progress.clone(),
                     )

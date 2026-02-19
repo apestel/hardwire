@@ -12,7 +12,7 @@ use http::request::Parts as RequestParts;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio_util::codec::{BytesCodec, FramedRead};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::instrument;
 
 use openidconnect::{Nonce, PkceCodeVerifier};
@@ -72,7 +72,7 @@ struct App {
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
     config: Config,
-    pending_auths: Arc<Mutex<HashMap<String, Nonce>>>,
+    pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier)>>>,
 }
 
 impl App {
@@ -435,8 +435,9 @@ async fn main() -> Result<()> {
 
         // Start task worker
         let worker_task_manager = Arc::clone(&task_manager);
+        let worker_data_dir = config.server.data_dir.clone();
         tokio::spawn(async move {
-            let mut worker = TaskWorker::new((*worker_task_manager).clone(), task_receiver);
+            let mut worker = TaskWorker::new((*worker_task_manager).clone(), task_receiver, worker_data_dir);
             worker.run().await;
         });
 
@@ -457,6 +458,11 @@ async fn main() -> Result<()> {
             .route("/healthcheck", get(healthcheck))
             .nest_service("/assets", ServeDir::new("dist/"))
             .nest("/admin", admin::admin_router())
+            .nest_service(
+                "/admin",
+                ServeDir::new("dist/admin")
+                    .fallback(ServeFile::new("dist/admin/index.html")),
+            )
             .with_state(app_state)
             // include trace context as header into the response
             .layer(OtelInResponseLayer)

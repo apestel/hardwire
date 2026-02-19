@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO files (sha256, path, file_size) VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "03c4ed02186dedd089d043d3a42f73572af11211aee570317f00f42bf1c7db63"
+}

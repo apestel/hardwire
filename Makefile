@@ -1,11 +1,20 @@
-all: db-migrate css build
+all: db-migrate frontend css build
 
 clean:
 	rm -rf target/*
-	rm dist/output.css
+	rm -f dist/css/output.css
+	rm -rf dist/admin/
+	rm -rf frontend/node_modules/
+	rm -rf frontend/.svelte-kit/
 
 css:
 	npx @tailwindcss/cli -i ./static/css/input.css -o ./dist/css/output.css
+
+frontend-install:
+	cd frontend && npm install
+
+frontend:
+	cd frontend && npm run build
 
 sqlx-setup:
 	cargo install sqlx-cli
@@ -13,12 +22,12 @@ sqlx-setup:
 	sqlx migrate run --source db/migrations
 
 db-migrate:
-	export DATABASE_URL=sqlite://db/db.sqlite3
-	test -e db/db.sqlite3 || echo "" > db/db.sqlite3
-	sqlx migrate run --source db/migrations
+	export DATABASE_URL=sqlite://data/db.sqlite
+	test -e data/db.sqlite || mkdir -p data && touch data/db.sqlite
+	sqlx migrate run --source migrations
 	cargo sqlx prepare
 
-build: css db-migrate
+build: db-migrate
 	cargo build -r
 
 push:

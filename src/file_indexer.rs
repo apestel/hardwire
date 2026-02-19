@@ -18,6 +18,10 @@ pub struct FileInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     children: Option<Vec<FileInfo>>,
 }
 
@@ -77,6 +81,16 @@ fn rec_scan_dir(base_path: &Path, path: &Path) -> io::Result<Vec<FileInfo>> {
             } else {
                 None
             };
+            let modified_at = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            let created_at = metadata
+                .created()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
 
             let name = path
                 .file_name()
@@ -101,6 +115,8 @@ fn rec_scan_dir(base_path: &Path, path: &Path) -> io::Result<Vec<FileInfo>> {
                 full_path,
                 is_dir: path.is_dir(),
                 size,
+                modified_at,
+                created_at,
                 children,
             });
         }
