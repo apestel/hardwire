@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main, wip]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features sqlite
+
+      - name: Set up database
+        run: |
+          mkdir -p data
+          touch data/db.sqlite
+          DATABASE_URL=sqlite://data/db.sqlite sqlx migrate run --source migrations
+
+      - name: Check sqlx offline cache
+        run: DATABASE_URL=sqlite://data/db.sqlite cargo sqlx prepare --check
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --release
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: Type check
+        run: cd frontend && npm run check
+
+      - name: Build
+        run: cd frontend && npm run build

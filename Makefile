@@ -30,9 +30,22 @@ db-migrate:
 build: db-migrate
 	cargo build -r
 
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "dev")
+IMAGE    := pestouille/hardwire
+
 push:
-	docker build --platform linux/amd64 -t pestouille/hardwire:0.1.0 .
-	docker push pestouille/hardwire:0.1.0
+	docker build --platform linux/amd64 \
+		-t $(IMAGE):$(VERSION) \
+		-t $(IMAGE):latest \
+		.
+	docker push $(IMAGE):$(VERSION)
+	docker push $(IMAGE):latest
 
 deploy:
-	ssh orion 'cd /opt/apps/services && echo `pwd` && docker compose pull && docker compose up -d'
+	ssh orion 'cd /opt/apps/services && IMAGE_TAG=$(VERSION) docker compose pull hardwire && docker compose up -d hardwire'
+
+tag:
+	@test -n "$(V)" || (echo "Usage: make tag V=1.2.3"; exit 1)
+	git tag -a v$(V) -m "Release v$(V)"
+	git push origin v$(V)
+	@echo "Tagged v$(V) and pushed — GitHub Actions will build and deploy"
