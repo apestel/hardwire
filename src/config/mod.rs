@@ -80,6 +80,14 @@ impl Config {
                 .context("Failed to create data directory")?;
         }
 
+        // Validate database parent directory exists or can be created
+        if let Some(db_parent) = self.database.path.parent() {
+            if !db_parent.as_os_str().is_empty() && !db_parent.exists() {
+                std::fs::create_dir_all(db_parent)
+                    .context("Failed to create database directory")?;
+            }
+        }
+
         // Validate port range
         if self.server.port == 0 {
             return Err(anyhow!("Server port cannot be 0"));

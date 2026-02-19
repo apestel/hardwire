@@ -12,7 +12,7 @@ use http::request::Parts as RequestParts;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio_util::codec::{BytesCodec, FramedRead};
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use tracing::instrument;
 
 use openidconnect::{Nonce, PkceCodeVerifier};
@@ -96,12 +96,9 @@ impl App {
 
 impl App {}
 
-async fn init_db(data_dir: PathBuf) -> Db {
-    let mut sqlite_path = data_dir.clone();
-    sqlite_path.push("db.sqlite");
-
+async fn init_db(db_path: PathBuf) -> Db {
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(sqlite_path)
+        .filename(db_path)
         .create_if_missing(true);
 
     // opts.disable_statement_logging();
@@ -405,7 +402,7 @@ async fn main() -> Result<()> {
     config
         .validate()
         .context("Configuration validation failed")?;
-    let db_pool = init_db(config.server.data_dir.clone()).await;
+    let db_pool = init_db(config.database.path.clone()).await;
 
     if cli.files.is_empty() && !cli.server {
         // let out = std::io::stdout();
@@ -458,11 +455,6 @@ async fn main() -> Result<()> {
             .route("/healthcheck", get(healthcheck))
             .nest_service("/assets", ServeDir::new("dist/"))
             .nest("/admin", admin::admin_router())
-            .nest_service(
-                "/admin",
-                ServeDir::new("dist/admin")
-                    .fallback(ServeFile::new("dist/admin/index.html")),
-            )
             .with_state(app_state)
             // include trace context as header into the response
             .layer(OtelInResponseLayer)

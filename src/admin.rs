@@ -472,9 +472,11 @@ pub async fn create_shared_link(
     State(app): State<App>,
     Json(request): Json<CreateSharedLinkRequest>,
 ) -> Result<Json<SharedLinkResponse>, AppError> {
-    let path = &request.file_path;
+    // file_path from the indexer is relative to data_dir — resolve to absolute
+    let abs_path = app.config.server.data_dir.join(&request.file_path);
+    let path = abs_path.to_string_lossy().to_string();
 
-    let metadata = tokio::fs::metadata(path)
+    let metadata = tokio::fs::metadata(&abs_path)
         .await
         .map_err(|_| AppError::FileNotFound(path.clone()))?;
     let file_size = metadata.len() as i64;
@@ -799,4 +801,8 @@ pub fn admin_router() -> Router<App> {
         .route("/api/stats/downloads/by_period", get(download_stats_by_period))
         .route("/api/stats/downloads/recent", get(recent_downloads))
         .route("/api/stats/downloads/status", get(download_status_distribution))
+        .fallback_service(
+            tower_http::services::ServeDir::new("dist/admin")
+                .fallback(tower_http::services::ServeFile::new("dist/admin/index.html")),
+        )
 }
