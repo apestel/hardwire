@@ -5,7 +5,6 @@
 	import Notification from './Notification.svelte';
 
 	let ws: WebSocket | null = null;
-	let wsNotifIds: Map<string, string> = new Map(); // transaction_id → notif id
 
 	onMount(() => {
 		connectWs();
@@ -26,30 +25,11 @@
 
 		ws.onmessage = (event) => {
 			try {
-				const data = JSON.parse(event.data);
-				if (data.event === 'download_progress') {
-					const txId: string = data.transaction_id;
-					const pct = Math.round((data.read_bytes / data.total_bytes) * 100);
-					const filename = (data.file_path as string).split('/').pop() ?? data.file_path;
-					const msg = `Downloading ${filename} — ${pct}%`;
-
-					if (!wsNotifIds.has(txId)) {
-						const id = notifications.add({
-							kind: 'progress',
-							message: msg,
-							progress: pct,
-							dismissible: false,
-						});
-						wsNotifIds.set(txId, id);
-					} else {
-						const id = wsNotifIds.get(txId)!;
-						if (pct >= 100) {
-							notifications.complete(id, `Download complete: ${filename}`);
-							wsNotifIds.delete(txId);
-						} else {
-							notifications.updateProgress(id, pct, msg);
-						}
-					}
+				const msg = JSON.parse(event.data);
+				if (msg.event === 'download_progress') {
+					const pct = Math.round((msg.read_bytes / msg.total_bytes) * 100);
+					const filename = (msg.file_path as string).split('/').pop() ?? msg.file_path;
+					notifications.downloadProgress(msg.transaction_id, filename, pct);
 				}
 			} catch {
 				// ignore malformed messages
