@@ -48,7 +48,6 @@ mod progress;
 mod worker;
 use config::Config;
 use progress::ProgressReader;
-use tracing_opentelemetry_instrumentation_sdk::find_current_trace_id;
 use worker::{TaskManager, tasks::TaskWorker};
 
 #[derive(clap::Parser)]
@@ -260,7 +259,13 @@ async fn download_file(
         Err(_) => return Err(not_found().await),
     };
     let file_size = file.metadata().await.unwrap().len();
-    let transaction_id = find_current_trace_id().unwrap();
+    // Stable ID across range requests: same client downloading same file in same share
+    let transaction_id = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(format!("{}:{}:{}", share_id, file_id, ip_address));
+        format!("{:x}", h.finalize())[..16].to_string()
+    };
 
     // Handle range request
     let (start, end) = if let Some(range) = headers.get(RANGE) {
@@ -307,6 +312,7 @@ async fn download_file(
     let progress_reader = ProgressReader::new(
         file,
         content_length as u32,
+        file_size,
         transaction_id,
         file_path,
         ip_address,

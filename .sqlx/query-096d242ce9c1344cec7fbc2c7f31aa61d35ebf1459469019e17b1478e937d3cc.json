@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO download (file_path, ip_address, transaction_id, status, file_size, started_at) VALUES ($1, $2, $3, 'in_progress', $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "096d242ce9c1344cec7fbc2c7f31aa61d35ebf1459469019e17b1478e937d3cc"
+}

@@ -11,7 +11,8 @@ use serde::Serialize;
 
 pub struct ProgressReader<R> {
     inner: R,
-    total_bytes: u32,
+    chunk_bytes: u32,   // bytes in this range request
+    file_size: u64,     // total file size (for completion detection across range requests)
     read_bytes: usize,
     transaction_id: String,
     file_path: String,
@@ -23,25 +24,18 @@ pub struct ProgressReader<R> {
 impl<R> ProgressReader<R> {
     pub fn new(
         inner: R,
-        total_bytes: u32,
+        chunk_bytes: u32,
+        file_size: u64,
         transaction_id: String,
         file_path: String,
         ip_address: String,
         channel_sender: broadcast::Sender<Event>,
         start_offset: u64,
     ) -> Self {
-        // CREATE TABLE downloads (
-        // id INTEGER PRIMARY KEY AUTOINCREMENT,
-        // ip_address TEXT,
-        // transaction_id TEXT,
-        // file_size INT,
-        // started_at INT,
-        // finished_at INT,
-        // );
-
         Self {
             inner,
-            total_bytes,
+            chunk_bytes,
+            file_size,
             read_bytes: 0,
             transaction_id,
             file_path,
@@ -70,7 +64,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
                     file_path: self.file_path.clone(),
                     transaction_id: self.transaction_id.clone(),
                     ip_address: self.ip_address.clone(),
-                    total_bytes: self.total_bytes,
+                    chunk_bytes: self.chunk_bytes,
+                    file_size: self.file_size,
                     read_bytes: self.read_bytes,
                     start_offset: self.start_offset,
                 }))
@@ -94,7 +89,8 @@ impl DownloadStatus {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileDownload {
-    total_bytes: u32,
+    chunk_bytes: u32,   // bytes in this range request
+    file_size: u64,     // total file size
     read_bytes: usize,
     transaction_id: String,
     file_path: String,
@@ -148,24 +144,24 @@ impl Manager {
     async fn update_download_progress(&mut self, pm: FileDownload) {
         let transaction_id = pm.transaction_id.clone();
         let now = chrono::Utc::now().timestamp();
+        let file_size_i64 = pm.file_size as i64;
 
-        if !self.ongoing_download.contains_key(&transaction_id) {
-            // First chunk: insert the row with started_at
-            sqlx::query!(
-                "INSERT INTO download (file_path, ip_address, transaction_id, status, file_size, started_at) VALUES ($1, $2, $3, 'in_progress', $4, $5)",
-                pm.file_path,
-                pm.ip_address,
-                pm.transaction_id,
-                pm.total_bytes,
-                now,
-            )
-            .execute(&self.db_pool)
-            .await
-            .unwrap();
-        }
+        // INSERT OR IGNORE: safe to call on every range request — only the first one inserts
+        sqlx::query!(
+            "INSERT OR IGNORE INTO download (file_path, ip_address, transaction_id, status, file_size, started_at) VALUES ($1, $2, $3, 'in_progress', $4, $5)",
+            pm.file_path,
+            pm.ip_address,
+            pm.transaction_id,
+            file_size_i64,
+            now,
+        )
+        .execute(&self.db_pool)
+        .await
+        .unwrap();
 
-        if pm.total_bytes > 0 && pm.read_bytes as u32 >= pm.total_bytes {
-            // Last chunk: mark as complete with finished_at
+        // Completion: this chunk reaches the end of the file
+        let chunk_end = pm.start_offset + pm.read_bytes as u64;
+        if pm.file_size > 0 && chunk_end >= pm.file_size {
             let status = DownloadStatus::Complete.to_str();
             sqlx::query!(
                 "UPDATE download SET status = $1, finished_at = $2 WHERE transaction_id = $3",

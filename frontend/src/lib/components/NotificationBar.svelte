@@ -27,7 +27,9 @@
 			try {
 				const msg = JSON.parse(event.data);
 				if (msg.event === 'download_progress') {
-					const pct = Math.round((msg.read_bytes / msg.total_bytes) * 100);
+					const pct = msg.file_size > 0
+						? Math.round(((msg.start_offset + msg.read_bytes) / msg.file_size) * 100)
+						: Math.round((msg.read_bytes / msg.chunk_bytes) * 100);
 					const filename = (msg.file_path as string).split('/').pop() ?? msg.file_path;
 					notifications.downloadProgress(msg.transaction_id, filename, pct);
 				}
