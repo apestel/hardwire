@@ -174,7 +174,7 @@ impl TaskManager {
         match status {
             TaskStatus::Running => update.started_at = Some(now),
             TaskStatus::Completed | TaskStatus::Failed => update.finished_at = Some(now),
-            TaskStatus::Pending => todo!(),
+            TaskStatus::Pending => {}
         }
 
         // Build query with only non-null fields

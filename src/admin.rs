@@ -109,31 +109,39 @@ pub struct AuthCallbackQuery {
     state: String,
 }
 
-pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> {
-    let http_client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
+/// Returns cached OIDC provider metadata. Discovery is performed once and reused.
+async fn oidc_provider_metadata(app: &App) -> Result<CoreProviderMetadata, AppError> {
+    app.oidc_metadata
+        .get_or_try_init(|| async {
+            let http_client = reqwest::ClientBuilder::new()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e))
+                })?;
+            let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
+                .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
+            CoreProviderMetadata::discover_async(issuer_url, &http_client)
+                .await
+                .map_err(|e| {
+                    AppError::AuthError(AuthErrorKind::OAuthError(format!(
+                        "Discovery failed: {:?}",
+                        e
+                    )))
+                })
+        })
+        .await
+        .cloned()
+}
 
+pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> {
+    let metadata = oidc_provider_metadata(&app).await?;
     let client_id = ClientId::new(app.config.auth.google_client_id.clone());
     let client_secret = ClientSecret::new(app.config.auth.google_client_secret.clone());
-    let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
-        .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
         .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
-
-    let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
-        .await
-        .map_err(|e| {
-            AppError::AuthError(AuthErrorKind::OAuthError(format!(
-                "Discovery failed: {:?}",
-                e
-            )))
-        })?;
-
-    let client =
-        CoreClient::from_provider_metadata(provider_metadata, client_id, Some(client_secret))
-            .set_redirect_uri(redirect_url);
+    let client = CoreClient::from_provider_metadata(metadata, client_id, Some(client_secret))
+        .set_redirect_uri(redirect_url);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -149,8 +157,13 @@ pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> 
         .set_pkce_challenge(pkce_challenge)
         .url();
 
+    let now = chrono::Utc::now().timestamp();
     let mut pending_auths = app.pending_auths.lock().await;
-    pending_auths.insert(csrf_token.secret().clone(), (nonce, pkce_verifier));
+
+    // Purge entries older than 10 minutes to prevent unbounded growth
+    pending_auths.retain(|_, (_, _, inserted_at)| now - *inserted_at < 600);
+
+    pending_auths.insert(csrf_token.secret().clone(), (nonce, pkce_verifier, now));
 
     Ok(Redirect::to(auth_url.as_str()))
 }
@@ -164,27 +177,15 @@ pub async fn google_callback(
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
 
+    let metadata = oidc_provider_metadata(&app).await?;
     let client_id = ClientId::new(app.config.auth.google_client_id.clone());
     let client_secret = ClientSecret::new(app.config.auth.google_client_secret.clone());
-    let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
-        .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
         .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
+    let client = CoreClient::from_provider_metadata(metadata, client_id, Some(client_secret))
+        .set_redirect_uri(redirect_url);
 
-    let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
-        .await
-        .map_err(|e| {
-            AppError::AuthError(AuthErrorKind::OAuthError(format!(
-                "Discovery failed: {:?}",
-                e
-            )))
-        })?;
-
-    let client =
-        CoreClient::from_provider_metadata(provider_metadata, client_id, Some(client_secret))
-            .set_redirect_uri(redirect_url);
-
-    let (nonce, pkce_verifier) = {
+    let (nonce, pkce_verifier, _) = {
         let mut pending_auths = app.pending_auths.lock().await;
         pending_auths
             .remove(&query.state)

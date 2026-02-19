@@ -26,10 +26,14 @@
 	</div>
 	{#if notif.kind === 'progress' && notif.progress !== undefined}
 		<div class="mt-2 h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
-			<div
-				class="h-full bg-blue-500 rounded-full transition-all duration-300"
-				style="width: {notif.progress}%"
-			></div>
+			{#if notif.progress > 0}
+				<div
+					class="h-full bg-blue-500 rounded-full transition-all duration-300"
+					style="width: {notif.progress}%"
+				></div>
+			{:else}
+				<div class="h-full w-1/3 bg-blue-500 rounded-full animate-[indeterminate_1.4s_ease-in-out_infinite]"></div>
+			{/if}
 		</div>
 	{/if}
 </div>

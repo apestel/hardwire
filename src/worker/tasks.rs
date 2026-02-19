@@ -14,31 +14,19 @@ pub struct TaskWorker {
     data_dir: PathBuf,
 }
 
+/// Minimal progress token — only tracks whether the archive job is done.
+/// sevenzip-mt compresses everything in one blocking call with no progress callbacks,
+/// so we report progress = 0 (indeterminate) until completion.
 #[derive(Clone)]
 struct ArchiveProgress {
-    total_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    processed_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     is_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ArchiveProgress {
-    fn new(total_bytes: u64) -> Self {
+    fn new() -> Self {
         Self {
-            total_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(total_bytes)),
-            processed_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             is_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
-    }
-
-    fn get_progress_percentage(&self) -> i32 {
-        let processed = self
-            .processed_bytes
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let total = self.total_bytes.load(std::sync::atomic::Ordering::Relaxed);
-        if total == 0 {
-            return 0;
-        }
-        ((processed as f64 / total as f64) * 100.0) as i32
     }
 }
 
@@ -78,29 +66,11 @@ impl TaskWorker {
 
         match input {
             TaskInput::CreateArchive(archive_input) => {
-                // Calculate total size of files to compress
-                let mut total_size = 0u64;
-                if let Some(dir) = &archive_input.directory {
-                    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
-                        if entry.file_type().is_file() {
-                            if let Ok(metadata) = entry.metadata() {
-                                total_size += metadata.len();
-                            }
-                        }
-                    }
-                } else if let Some(files) = &archive_input.files {
-                    for file in files {
-                        if let Ok(metadata) = std::fs::metadata(file) {
-                            total_size += metadata.len();
-                        }
-                    }
-                }
-
-                // Create progress tracker
-                let progress = ArchiveProgress::new(total_size);
+                // Create progress tracker (indeterminate — sevenzip-mt has no progress callbacks)
+                let progress = ArchiveProgress::new();
                 let progress_clone = progress.clone();
 
-                // Spawn progress monitoring task
+                // Spawn progress monitoring task — keeps task alive in DB while compressing
                 let task_manager = self.task_manager.clone();
                 let task_id_clone = task_id.to_string();
                 tokio::spawn(async move {
@@ -108,13 +78,13 @@ impl TaskWorker {
                         .is_complete
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
-                        let progress_percentage = progress_clone.get_progress_percentage();
+                        // Report progress = 0 (indeterminate) until done
                         if let Err(e) = task_manager
                             .update_task_status(
                                 &task_id_clone,
                                 TaskStatus::Running,
                                 None,
-                                Some(progress_percentage),
+                                Some(0),
                             )
                             .await
                         {
@@ -131,14 +101,14 @@ impl TaskWorker {
                     self.data_dir.join(&archive_input.output_path)
                 };
 
-                let result = if let Some(dir) = archive_input.directory {
+                let archive_result = if let Some(dir) = archive_input.directory {
                     create_7z_archive_with_progress(
                         vec![dir],
                         output_path,
                         archive_input.password,
                         progress.clone(),
                     )
-                    .await?
+                    .await
                 } else if let Some(files) = archive_input.files {
                     create_7z_archive_with_progress(
                         files,
@@ -146,15 +116,17 @@ impl TaskWorker {
                         archive_input.password,
                         progress.clone(),
                     )
-                    .await?
+                    .await
                 } else {
-                    anyhow::bail!("Either directory or files must be specified");
+                    Err(anyhow::anyhow!("Either directory or files must be specified"))
                 };
 
-                // Mark progress as complete
+                // Always stop the monitoring goroutine, whether success or failure
                 progress
                     .is_complete
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+
+                let result = archive_result?;
 
                 // Update task as completed
                 self.task_manager
@@ -182,12 +154,12 @@ impl TaskWorker {
 }
 
 
-/// Create a 7z archive with progress tracking
+/// Create a 7z archive
 async fn create_7z_archive_with_progress<P: AsRef<Path>>(
     source: Vec<P>,
     output_path: PathBuf,
     _password: Option<String>,
-    progress: ArchiveProgress,
+    _progress: ArchiveProgress,
 ) -> Result<PathBuf> {
     // Ensure output path has .7z extension
     let output_path = if !output_path.extension().map_or(false, |ext| ext == "7z") {
@@ -236,13 +208,6 @@ async fn create_7z_archive_with_progress<P: AsRef<Path>>(
                     archive_name,
                 )
                 .map_err(|e| anyhow::anyhow!("Failed to add file: {e}"))?;
-
-            // Update progress after queuing each file
-            if let Ok(meta) = std::fs::metadata(disk_path) {
-                progress
-                    .processed_bytes
-                    .fetch_add(meta.len(), std::sync::atomic::Ordering::Relaxed);
-            }
         }
 
         archive
@@ -268,7 +233,7 @@ pub async fn create_7z_archive<P: AsRef<Path>>(
     output_path: PathBuf,
     password: Option<String>,
 ) -> Result<PathBuf> {
-    create_7z_archive_with_progress(source, output_path, password, ArchiveProgress::new(0)).await
+    create_7z_archive_with_progress(source, output_path, password, ArchiveProgress::new()).await
 }
 
 /// Create a 7z archive from a directory

@@ -16,6 +16,7 @@ use tower_http::services::ServeDir;
 use tracing::instrument;
 
 use openidconnect::{Nonce, PkceCodeVerifier};
+use openidconnect::core::CoreProviderMetadata;
 
 use std::collections::HashMap;
 
@@ -72,7 +73,8 @@ struct App {
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
     config: Config,
-    pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier)>>>,
+    pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier, i64)>>>,
+    oidc_metadata: Arc<tokio::sync::OnceCell<CoreProviderMetadata>>,
 }
 
 impl App {
@@ -90,6 +92,7 @@ impl App {
             indexer,
             config,
             pending_auths: Arc::new(Mutex::new(HashMap::new())),
+            oidc_metadata: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 }
@@ -219,7 +222,10 @@ async fn head_file(
         Ok(file) => file,
         Err(_) => return Err(not_found().await),
     };
-    let file_size = file.metadata().await.unwrap().len();
+    let file_size = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(_) => return Err(not_found().await),
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_LENGTH, file_size.to_string().parse().unwrap());
@@ -258,7 +264,13 @@ async fn download_file(
         Ok(file) => file,
         Err(_) => return Err(not_found().await),
     };
-    let file_size = file.metadata().await.unwrap().len();
+    let file_size = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read file metadata: {}", e),
+        ).into_response()),
+    };
     // Stable ID across range requests: same client downloading same file in same share
     let transaction_id = {
         use sha2::{Digest, Sha256};
@@ -346,58 +358,56 @@ async fn publish_files(
     base_url: &String,
     db_pool: &SqlitePool,
 ) -> Result<String> {
-    let mut files_id: Vec<i64> = vec![];
     let share_id = nanoid::nanoid!(10);
+    let now = chrono::offset::Utc::now().timestamp();
 
+    let mut tx = db_pool.begin().await?;
+
+    let mut files_id: Vec<i64> = vec![];
     for filename in files {
         if std::path::Path::new(&filename).exists() {
             let file = File::open(&filename)?;
-            let file_size = i64::try_from(file.metadata().unwrap().len()).unwrap();
-            // FIXME: Should implement a SQL Transaction with BEGIN/ROLLBACK in case of error
-            match sqlx::query!(
+            let file_size = i64::try_from(file.metadata()?.len())?;
+            let row = sqlx::query!(
                 "INSERT INTO files (sha256, path, file_size) VALUES ($1, $2, $3)",
                 "",
                 filename,
                 file_size
             )
-            .execute(db_pool)
+            .execute(&mut *tx)
             .await
-            {
-                Ok(row) => files_id.push(row.last_insert_rowid()),
-                Err(e) => return Err(anyhow!("failed to create share link: {:?}", e)),
-            };
+            .map_err(|e| anyhow!("failed to insert file: {:?}", e))?;
+            files_id.push(row.last_insert_rowid());
         }
     }
-    if !files_id.is_empty() {
-        let now = chrono::offset::Utc::now().timestamp();
-        match sqlx::query!(
-            "INSERT INTO share_links (id, expiration, created_at) VALUES ($1, $2, $3)",
-            share_id,
-            -1,
-            now
-        )
-        .execute(db_pool)
-        .await
-        {
-            Ok(_) => {
-                for id in files_id {
-                    sqlx::query!(
-                        "INSERT INTO share_link_files (share_link_id, file_id) VALUES ($1, $2)",
-                        share_id,
-                        id
-                    )
-                    .execute(db_pool)
-                    .await?;
-                }
-                return Ok(format!("{}/s/{}", base_url, share_id));
-            }
-            Err(e) => {
-                log::error!("{}", e);
-                return Err(anyhow!("failed to create share link: {:?}", e));
-            }
-        };
+
+    if files_id.is_empty() {
+        return Err(anyhow::Error::msg("no valid files to share"));
     }
-    Err(anyhow::Error::msg("failed to create share link"))
+
+    sqlx::query!(
+        "INSERT INTO share_links (id, expiration, created_at) VALUES ($1, $2, $3)",
+        share_id,
+        -1,
+        now
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| anyhow!("failed to create share link: {:?}", e))?;
+
+    for id in &files_id {
+        sqlx::query!(
+            "INSERT INTO share_link_files (share_link_id, file_id) VALUES ($1, $2)",
+            share_id,
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    Ok(format!("{}/s/{}", base_url, share_id))
 }
 
 // ServerConfig is now defined in the config module
