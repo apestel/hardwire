@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE download SET status = $1, finished_at = $2 WHERE transaction_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e806cce0b0fe6538d67ee4fb1851934868dca33daccb5bcee840cc48645460ce"
+}

@@ -141,20 +141,38 @@ impl Manager {
     }
 
     async fn update_download_progress(&mut self, pm: FileDownload) {
-        let transaction_id = pm.clone().transaction_id.clone();
+        let transaction_id = pm.transaction_id.clone();
+        let now = chrono::Utc::now().timestamp();
 
-        if pm.total_bytes == pm.read_bytes as u32 {
-            let download_status_str = DownloadStatus::Complete.to_str();
+        if !self.ongoing_download.contains_key(&transaction_id) {
+            // First chunk: insert the row with started_at
             sqlx::query!(
-                "INSERT INTO download (file_path, transaction_id, status, file_size) VALUES ($1, $2, $3, $4)",
+                "INSERT INTO download (file_path, transaction_id, status, file_size, started_at) VALUES ($1, $2, 'in_progress', $3, $4)",
                 pm.file_path,
                 pm.transaction_id,
-                download_status_str,
                 pm.total_bytes,
+                now,
             )
             .execute(&self.db_pool)
-            .await.unwrap();
+            .await
+            .unwrap();
         }
-        self.ongoing_download.insert(transaction_id, pm.clone());
+
+        if pm.total_bytes > 0 && pm.read_bytes as u32 >= pm.total_bytes {
+            // Last chunk: mark as complete with finished_at
+            let status = DownloadStatus::Complete.to_str();
+            sqlx::query!(
+                "UPDATE download SET status = $1, finished_at = $2 WHERE transaction_id = $3",
+                status,
+                now,
+                pm.transaction_id,
+            )
+            .execute(&self.db_pool)
+            .await
+            .unwrap();
+            self.ongoing_download.remove(&transaction_id);
+        } else {
+            self.ongoing_download.insert(transaction_id, pm);
+        }
     }
 }
