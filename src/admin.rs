@@ -655,7 +655,7 @@ pub async fn recent_downloads(
     let limit = query.limit.unwrap_or(100);
 
     let downloads: Vec<DownloadRecord> = sqlx::query_as(
-        "SELECT id, file_path, ip_address, transaction_id, status, file_size, started_at, finished_at FROM download ORDER BY started_at DESC LIMIT ?"
+        "SELECT id, file_path, ip_address, transaction_id, status, file_size, started_at, finished_at FROM download ORDER BY finished_at DESC NULLS LAST, started_at DESC LIMIT ?"
     )
     .bind(limit)
     .fetch_all(&app.db_pool)

@@ -25,7 +25,8 @@
 					<th class="pb-2 pr-4 font-medium">IP</th>
 					<th class="pb-2 pr-4 font-medium">Status</th>
 					<th class="pb-2 pr-4 font-medium">Size</th>
-					<th class="pb-2 font-medium">Started</th>
+					<th class="pb-2 pr-4 font-medium">Started</th>
+					<th class="pb-2 font-medium">Finished</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -40,13 +41,16 @@
 								class="px-2 py-0.5 rounded-full text-xs font-medium
 								{row.status === 'complete'
 									? 'bg-green-900 text-green-300'
+									: row.status === 'in_progress'
+									? 'bg-blue-900 text-blue-300'
 									: 'bg-gray-700 text-gray-300'}"
 							>
 								{row.status}
 							</span>
 						</td>
 						<td class="py-2 pr-4 text-gray-400">{formatSize(row.file_size)}</td>
-						<td class="py-2 text-gray-400 whitespace-nowrap">{formatTs(row.started_at)}</td>
+						<td class="py-2 pr-4 text-gray-400 whitespace-nowrap">{formatTs(row.started_at)}</td>
+						<td class="py-2 text-gray-400 whitespace-nowrap">{row.finished_at ? formatTs(row.finished_at) : '—'}</td>
 					</tr>
 				{/each}
 			</tbody>

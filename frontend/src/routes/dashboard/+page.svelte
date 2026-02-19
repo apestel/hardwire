@@ -1,18 +1,22 @@
 <script lang="ts">
-	import { fetchDownloadsByPeriod } from '$lib/api';
+	import { fetchDownloadsByPeriod, fetchRecentDownloads } from '$lib/api';
 	import StatsCard from '$lib/components/StatsCard.svelte';
 	import DownloadsChart from '$lib/components/DownloadsChart.svelte';
 	import RecentDownloadsTable from '$lib/components/RecentDownloadsTable.svelte';
 	import PeriodSelector from '$lib/components/PeriodSelector.svelte';
-	import type { DownloadsByPeriod } from '$lib/types';
+	import type { DownloadRecord, DownloadsByPeriod } from '$lib/types';
 
 	let { data } = $props();
 
 	let period = $state<'day' | 'week' | 'month'>('month');
 	// eslint-disable-next-line svelte/state_referenced_locally
 	let chartData = $state<DownloadsByPeriod>(data.byPeriod);
+	let recentRows = $state<DownloadRecord[]>(data.recent);
 	let fromDate = $state('');
 	let toDate = $state('');
+	let refreshingTable = $state(false);
+
+	let canFilter = $derived(fromDate !== '' && toDate !== '');
 
 	function formatSize(bytes: number): string {
 		if (bytes < 1024) return `${bytes} B`;
@@ -29,20 +33,12 @@
 
 	async function refreshChart() {
 		const raw = await fetchDownloadsByPeriod(period, 60);
-		if (!fromDate && !toDate) {
+		if (!fromDate || !toDate) {
 			chartData = raw;
 			return;
 		}
-		const from = fromDate ? new Date(fromDate).getTime() / 1000 : 0;
-		const to = toDate ? new Date(toDate).getTime() / 1000 + 86400 : Infinity;
-		chartData = {
-			...raw,
-			data: raw.data.filter(() => {
-				// Client-side date filtering (approximate — server groups by period label)
-				return true;
-			}),
-		};
-		// Simple label-based filtering
+		const from = new Date(fromDate).getTime() / 1000;
+		const to = new Date(toDate).getTime() / 1000 + 86400;
 		chartData = {
 			...raw,
 			data: raw.data.filter((d) => {
@@ -52,8 +48,16 @@
 		};
 	}
 
+	async function refreshTable() {
+		refreshingTable = true;
+		try {
+			recentRows = await fetchRecentDownloads(100);
+		} finally {
+			refreshingTable = false;
+		}
+	}
+
 	$effect(() => {
-		// Re-fetch when period changes
 		void period;
 		refreshChart();
 	});
@@ -79,16 +83,25 @@
 				<input
 					type="date"
 					bind:value={fromDate}
-					onchange={refreshChart}
 					class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white"
 				/>
 				<span class="text-gray-500 text-sm">to</span>
 				<input
 					type="date"
 					bind:value={toDate}
-					onchange={refreshChart}
 					class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white"
 				/>
+				{#if canFilter}
+					<button
+						onclick={refreshChart}
+						class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
+					>
+						<svg class="size-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+						</svg>
+						Apply
+					</button>
+				{/if}
 				<PeriodSelector bind:period onchange={refreshChart} />
 			</div>
 		</div>
@@ -96,7 +109,19 @@
 	</div>
 
 	<div class="bg-gray-900 border border-gray-800 rounded-xl p-6">
-		<h2 class="text-lg font-semibold text-white mb-4">Recent Downloads</h2>
-		<RecentDownloadsTable rows={data.recent} />
+		<div class="flex items-center justify-between mb-4">
+			<h2 class="text-lg font-semibold text-white">Recent Downloads</h2>
+			<button
+				onclick={refreshTable}
+				disabled={refreshingTable}
+				class="flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
+			>
+				<svg class="size-3.5 {refreshingTable ? 'animate-spin' : ''}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+				</svg>
+				Refresh
+			</button>
+		</div>
+		<RecentDownloadsTable rows={recentRows} />
 	</div>
 </div>
