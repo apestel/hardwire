@@ -15,6 +15,7 @@ pub struct ProgressReader<R> {
     read_bytes: usize,
     transaction_id: String,
     file_path: String,
+    ip_address: String,
     channel_sender: broadcast::Sender<Event>,
     start_offset: u64,
 }
@@ -25,6 +26,7 @@ impl<R> ProgressReader<R> {
         total_bytes: u32,
         transaction_id: String,
         file_path: String,
+        ip_address: String,
         channel_sender: broadcast::Sender<Event>,
         start_offset: u64,
     ) -> Self {
@@ -43,6 +45,7 @@ impl<R> ProgressReader<R> {
             read_bytes: 0,
             transaction_id,
             file_path,
+            ip_address,
             channel_sender,
             start_offset,
         }
@@ -66,6 +69,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
                 .send(Event::DownloadProgress(FileDownload {
                     file_path: self.file_path.clone(),
                     transaction_id: self.transaction_id.clone(),
+                    ip_address: self.ip_address.clone(),
                     total_bytes: self.total_bytes,
                     read_bytes: self.read_bytes,
                     start_offset: self.start_offset,
@@ -94,6 +98,7 @@ pub struct FileDownload {
     read_bytes: usize,
     transaction_id: String,
     file_path: String,
+    ip_address: String,
     start_offset: u64,
 }
 
@@ -147,8 +152,9 @@ impl Manager {
         if !self.ongoing_download.contains_key(&transaction_id) {
             // First chunk: insert the row with started_at
             sqlx::query!(
-                "INSERT INTO download (file_path, transaction_id, status, file_size, started_at) VALUES ($1, $2, 'in_progress', $3, $4)",
+                "INSERT INTO download (file_path, ip_address, transaction_id, status, file_size, started_at) VALUES ($1, $2, $3, 'in_progress', $4, $5)",
                 pm.file_path,
+                pm.ip_address,
                 pm.transaction_id,
                 pm.total_bytes,
                 now,

@@ -36,8 +36,9 @@ use axum::body::Body;
 
 type Db = sqlx::SqlitePool;
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::routing::{get, head};
+use std::net::SocketAddr;
 
 mod admin;
 mod config;
@@ -230,8 +231,16 @@ async fn head_file(
 async fn download_file(
     State(app_state): State<App>,
     Path((share_id, file_id)): Path<(String, u32)>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Priority: CF-Connecting-IP (Cloudflare) > X-Forwarded-For (Traefik) > direct peer
+    let ip_address = headers
+        .get("CF-Connecting-IP")
+        .or_else(|| headers.get("X-Forwarded-For"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_else(|| peer_addr.ip().to_string());
     let file_path = match sqlx::query!(
         r#"SELECT path as file_path
     FROM files JOIN share_link_files ON share_link_files.file_id=files.id
@@ -300,6 +309,7 @@ async fn download_file(
         content_length as u32,
         transaction_id,
         file_path,
+        ip_address,
         app_state.progress_channel_sender,
         start,
     );
@@ -477,7 +487,7 @@ async fn main() -> Result<()> {
 
         let bind_adress = format!("0.0.0.0:{}", config.server.port);
         let listener = tokio::net::TcpListener::bind(bind_adress).await.unwrap();
-        axum::serve(listener, app)
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
             .with_graceful_shutdown(shutdown_signal())
             .await
             .unwrap();
