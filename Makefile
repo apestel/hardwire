@@ -33,7 +33,7 @@ build: db-migrate
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "dev")
 IMAGE    := pestouille/hardwire
 
-push:
+push: 
 	docker build --platform linux/amd64 \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \
