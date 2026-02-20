@@ -16,6 +16,8 @@ function createNotificationStore() {
 	const { subscribe, update } = writable<Notification[]>([]);
 	// Maps transaction_id → notification id, survives WebSocket reconnects
 	const downloadMap = new Map<string, string>();
+	// Keeps txIds that have already completed, to ignore late range-request events
+	const completedDownloads = new Set<string>();
 
 	const store = {
 		subscribe,
@@ -58,11 +60,14 @@ function createNotificationStore() {
 		},
 		// Download progress tracking — one notification per transaction_id
 		downloadProgress(txId: string, filename: string, pct: number) {
+			// Ignore late range-request events for already-completed downloads
+			if (completedDownloads.has(txId)) return;
 			if (downloadMap.has(txId)) {
 				const id = downloadMap.get(txId)!;
 				if (pct >= 100) {
 					store.complete(id, `Download complete: ${filename}`);
 					downloadMap.delete(txId);
+					completedDownloads.add(txId);
 				} else {
 					store.updateProgress(id, pct, `Downloading ${filename} — ${pct}%`);
 				}

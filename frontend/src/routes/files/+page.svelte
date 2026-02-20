@@ -1,13 +1,13 @@
 <script lang="ts">
+	import { invalidate } from '$app/navigation';
 	import FileTree from '$lib/components/FileTree.svelte';
 	import { notifications } from '$lib/stores/notifications';
-	import { createSharedLink, createTask, getTaskStatus, rescanFiles, fetchFiles } from '$lib/api';
+	import { createSharedLink, createTask, getTaskStatus, rescanFiles } from '$lib/api';
 	import type { FileInfo } from '$lib/types';
 
 	let { data } = $props();
 
 	let selected = $state<Set<string>>(new Set());
-	let files = $state(data.files);
 	let scanning = $state(false);
 
 	type SortField = 'name' | 'modified_at' | 'created_at' | 'size';
@@ -39,7 +39,7 @@
 			);
 	}
 
-	let sortedFiles = $derived(sortNodes(files));
+	let sortedFiles = $derived(sortNodes(data.files));
 
 	function toggleSort(field: SortField) {
 		if (sortField === field) {
@@ -57,6 +57,24 @@
 		selected = next;
 	}
 
+	async function copyToClipboard(text: string): Promise<boolean> {
+		try {
+			await navigator.clipboard.writeText(text);
+			return true;
+		} catch {
+			// Fallback for async contexts where clipboard API is blocked
+			const ta = document.createElement('textarea');
+			ta.value = text;
+			ta.style.position = 'fixed';
+			ta.style.opacity = '0';
+			document.body.appendChild(ta);
+			ta.select();
+			const ok = document.execCommand('copy');
+			document.body.removeChild(ta);
+			return ok;
+		}
+	}
+
 	async function handleCreateShareLinks() {
 		const paths = [...selected];
 		const urls: string[] = [];
@@ -64,7 +82,7 @@
 			const link = await createSharedLink(path);
 			urls.push(link.url);
 		}
-		await navigator.clipboard.writeText(urls.join('\n'));
+		await copyToClipboard(urls.join('\n'));
 		notifications.add({
 			kind: 'success',
 			message: `${urls.length} share link(s) copied to clipboard`,
@@ -73,12 +91,15 @@
 		});
 	}
 
+	async function refreshFiles() {
+		await rescanFiles();
+		await invalidate('app:files');
+	}
+
 	async function handleRescan() {
 		scanning = true;
 		try {
-			await rescanFiles();
-			await new Promise((r) => setTimeout(r, 1500));
-			files = await fetchFiles();
+			await refreshFiles();
 			selected = new Set();
 		} finally {
 			scanning = false;
@@ -106,19 +127,42 @@
 		});
 
 		const interval = setInterval(async () => {
-			const task = await getTaskStatus(task_id);
-			notifications.updateProgress(notifId, task.progress, `Archiving... ${task.progress}%`);
+			try {
+				const task = await getTaskStatus(task_id);
 
-			if (task.status === 'Completed') {
-				clearInterval(interval);
-				if (task.archive_path) {
-					const link = await createSharedLink(task.archive_path);
-					await navigator.clipboard.writeText(link.url);
+				if (task.status === 'Completed') {
+					clearInterval(interval);
+
+					// Rescan so the new archive appears in the file tree (best-effort)
+					refreshFiles().catch(() => {});
+
+					if (task.archive_path) {
+						let link: { url: string } | null = null;
+						try {
+							link = await createSharedLink(task.archive_path);
+						} catch (e) {
+							console.error('createSharedLink failed:', e);
+						}
+
+						if (link) {
+							const copied = await copyToClipboard(link.url);
+							if (copied) {
+								notifications.complete(notifId, 'Archive ready — share link copied to clipboard');
+							} else {
+								notifications.complete(notifId, `Archive ready — share link: ${link.url}`);
+							}
+						} else {
+							notifications.complete(notifId, 'Archive ready (share link creation failed)');
+						}
+					} else {
+						notifications.complete(notifId, 'Archive ready');
+					}
+				} else if (task.status === 'Failed') {
+					clearInterval(interval);
+					notifications.error(notifId, `Archive failed: ${task.error ?? 'unknown error'}`);
 				}
-				notifications.complete(notifId, 'Archive ready — share link copied to clipboard');
-			} else if (task.status === 'Failed') {
-				clearInterval(interval);
-				notifications.error(notifId, `Archive failed: ${task.error ?? 'unknown error'}`);
+			} catch {
+				// transient poll error — keep retrying
 			}
 		}, 2000);
 	}

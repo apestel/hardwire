@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 #[derive(Serialize, Debug, Clone)]
 pub struct FileInfo {
@@ -25,25 +26,29 @@ pub struct FileInfo {
     children: Option<Vec<FileInfo>>,
 }
 
+/// Signal sent to the indexer thread: rescan now, then optionally notify the caller.
+struct RescanSignal {
+    done_tx: Option<oneshot::Sender<()>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct FileIndexer {
     pub files: Arc<Mutex<Option<Vec<FileInfo>>>>,
-    pub _signal_index_updater: Sender<()>,
+    signal_tx: Sender<RescanSignal>,
 }
 
 impl FileIndexer {
     pub fn new(base_path: &Path, update_interval: u64) -> FileIndexer {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<RescanSignal>();
         let rescan_tx = tx.clone();
         let base_path: Arc<PathBuf> = Arc::new(base_path.to_path_buf());
 
         let files: Arc<Mutex<Option<Vec<FileInfo>>>> = Arc::new(Mutex::new(Some(vec![])));
-        // Spawn a thread to run the scan periodically
         let files_clone = Arc::clone(&files);
         let base_path_clone = Arc::clone(&base_path);
 
         thread::spawn(move || {
-            loop {
+            let do_scan = |done_tx: Option<oneshot::Sender<()>>| {
                 match rec_scan_dir(&base_path_clone, &base_path_clone) {
                     Ok(dir_structure) => {
                         let mut output = files_clone.lock().unwrap();
@@ -51,18 +56,41 @@ impl FileIndexer {
                     }
                     Err(e) => eprintln!("Error scanning directory: {}", e),
                 }
+                if let Some(tx) = done_tx {
+                    let _ = tx.send(());
+                }
+            };
 
-                // Wait for either a minute or a manual rescan signal
-                let res = rx.recv_timeout(Duration::from_secs(update_interval));
-                if res.is_ok() {
-                    println!("Manual rescan signal received at {}", Utc::now());
+            // Initial scan on startup
+            do_scan(None);
+
+            loop {
+                // Wait for either a manual signal or the periodic interval
+                match rx.recv_timeout(Duration::from_secs(update_interval)) {
+                    Ok(signal) => {
+                        println!("Manual rescan signal received at {}", Utc::now());
+                        do_scan(signal.done_tx);
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        do_scan(None);
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
         });
 
         FileIndexer {
             files,
-            _signal_index_updater: rescan_tx.clone(),
+            signal_tx: rescan_tx,
+        }
+    }
+
+    /// Trigger a rescan and return a receiver that resolves when the scan completes.
+    pub fn rescan_and_wait(&self) -> Option<oneshot::Receiver<()>> {
+        let (done_tx, done_rx) = oneshot::channel();
+        match self.signal_tx.send(RescanSignal { done_tx: Some(done_tx) }) {
+            Ok(()) => Some(done_rx),
+            Err(_) => None,
         }
     }
 }

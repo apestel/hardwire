@@ -15,6 +15,7 @@
 	let fromDate = $state('');
 	let toDate = $state('');
 	let refreshingTable = $state(false);
+	let refreshingChart = $state(false);
 
 	let canFilter = $derived(fromDate !== '' && toDate !== '');
 
@@ -32,20 +33,25 @@
 	}
 
 	async function refreshChart() {
-		const raw = await fetchDownloadsByPeriod(period, 60);
-		if (!fromDate || !toDate) {
-			chartData = raw;
-			return;
+		refreshingChart = true;
+		try {
+			const raw = await fetchDownloadsByPeriod(period, 60);
+			if (!fromDate || !toDate) {
+				chartData = raw;
+				return;
+			}
+			const from = new Date(fromDate).getTime() / 1000;
+			const to = new Date(toDate).getTime() / 1000 + 86400;
+			chartData = {
+				...raw,
+				data: raw.data.filter((d) => {
+					const ts = new Date(d.date).getTime() / 1000;
+					return ts >= from && ts <= to;
+				}),
+			};
+		} finally {
+			refreshingChart = false;
 		}
-		const from = new Date(fromDate).getTime() / 1000;
-		const to = new Date(toDate).getTime() / 1000 + 86400;
-		chartData = {
-			...raw,
-			data: raw.data.filter((d) => {
-				const ts = new Date(d.date).getTime() / 1000;
-				return ts >= from && ts <= to;
-			}),
-		};
 	}
 
 	async function refreshTable() {
@@ -94,9 +100,10 @@
 				{#if canFilter}
 					<button
 						onclick={refreshChart}
-						class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
+						disabled={refreshingChart}
+						class="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
 					>
-						<svg class="size-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+						<svg class="size-3.5 {refreshingChart ? 'animate-spin' : ''}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
 						</svg>
 						Apply

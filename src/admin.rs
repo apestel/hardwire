@@ -776,10 +776,13 @@ pub async fn rescan_files(
     _auth: AdminAuthMiddleware,
     State(app): State<App>,
 ) -> Result<StatusCode, AppError> {
-    app.indexer
-        ._signal_index_updater
-        .send(())
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to trigger rescan: {}", e)))?;
+    let done_rx = app
+        .indexer
+        .rescan_and_wait()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Failed to trigger rescan")))?;
+    // Wait for the indexer thread to finish scanning before returning,
+    // so the caller can immediately fetch fresh file listings.
+    let _ = done_rx.await;
     Ok(StatusCode::NO_CONTENT)
 }
 

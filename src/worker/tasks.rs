@@ -102,16 +102,25 @@ impl TaskWorker {
                 };
 
                 let archive_result = if let Some(dir) = archive_input.directory {
+                    let abs_dir = if dir.is_absolute() {
+                        dir
+                    } else {
+                        self.data_dir.join(dir)
+                    };
                     create_7z_archive_with_progress(
-                        vec![dir],
+                        vec![abs_dir],
                         output_path,
                         archive_input.password,
                         progress.clone(),
                     )
                     .await
                 } else if let Some(files) = archive_input.files {
+                    let abs_files: Vec<PathBuf> = files
+                        .into_iter()
+                        .map(|f| if f.is_absolute() { f } else { self.data_dir.join(f) })
+                        .collect();
                     create_7z_archive_with_progress(
-                        files,
+                        abs_files,
                         output_path,
                         archive_input.password,
                         progress.clone(),
@@ -128,14 +137,16 @@ impl TaskWorker {
 
                 let result = archive_result?;
 
-                // Update task as completed
-                self.task_manager
-                    .update_task_status(task_id, TaskStatus::Completed, None, Some(100))
-                    .await?;
+                // Store the archive path relative to data_dir (same convention as the
+                // file indexer) so create_shared_link can resolve it correctly.
+                let relative_path = result
+                    .strip_prefix(&self.data_dir)
+                    .unwrap_or(&result)
+                    .to_string_lossy()
+                    .to_string();
 
-                // Store output data
                 let output_data = serde_json::json!({
-                    "archive_path": result
+                    "archive_path": relative_path
                 })
                 .to_string();
 
@@ -146,6 +157,10 @@ impl TaskWorker {
                 )
                 .execute(&self.task_manager.db)
                 .await?;
+
+                self.task_manager
+                    .update_task_status(task_id, TaskStatus::Completed, None, Some(100))
+                    .await?;
             }
         }
 

@@ -56,9 +56,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
         let read_poll = Pin::new(&mut self.as_mut().inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(_)) = read_poll {
-            self.read_bytes += buf.filled().len();
+            self.read_bytes += buf.filled().len() - before;
             let _ = self.channel_sender.send(Event::DownloadProgress(FileDownload {
                 file_path: self.file_path.clone(),
                 transaction_id: self.transaction_id.clone(),
