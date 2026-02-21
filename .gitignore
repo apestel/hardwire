@@ -1,6 +1,14 @@
 /target
 .aider*
+.env
+.idea/
+.roo/
+.vscode/
 /data
+db.sqlite
 /dist/admin/
+/dist/html/
 /frontend/node_modules/
 /frontend/.svelte-kit/
+load-test.js
+templates/test.html
