@@ -9,11 +9,14 @@ use tokio::sync::broadcast;
 
 use serde::Serialize;
 
+const PROGRESS_REPORT_THRESHOLD: usize = 256 * 1024; // emit event every 256 KB
+
 pub struct ProgressReader<R> {
     inner: R,
     chunk_bytes: u32,   // bytes in this range request
     file_size: u64,     // total file size (for completion detection across range requests)
     read_bytes: usize,
+    bytes_since_last_event: usize,
     transaction_id: String,
     file_path: String,
     ip_address: String,
@@ -37,6 +40,7 @@ impl<R> ProgressReader<R> {
             chunk_bytes,
             file_size,
             read_bytes: 0,
+            bytes_since_last_event: 0,
             transaction_id,
             file_path,
             ip_address,
@@ -59,16 +63,22 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
         let before = buf.filled().len();
         let read_poll = Pin::new(&mut self.as_mut().inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(_)) = read_poll {
-            self.read_bytes += buf.filled().len() - before;
-            let _ = self.channel_sender.send(Event::DownloadProgress(FileDownload {
-                file_path: self.file_path.clone(),
-                transaction_id: self.transaction_id.clone(),
-                ip_address: self.ip_address.clone(),
-                chunk_bytes: self.chunk_bytes,
-                file_size: self.file_size,
-                read_bytes: self.read_bytes,
-                start_offset: self.start_offset,
-            }));
+            let newly_read = buf.filled().len() - before;
+            self.read_bytes += newly_read;
+            self.bytes_since_last_event += newly_read;
+            let is_eof = newly_read == 0;
+            if self.bytes_since_last_event >= PROGRESS_REPORT_THRESHOLD || is_eof {
+                self.bytes_since_last_event = 0;
+                let _ = self.channel_sender.send(Event::DownloadProgress(FileDownload {
+                    file_path: self.file_path.clone(),
+                    transaction_id: self.transaction_id.clone(),
+                    ip_address: self.ip_address.clone(),
+                    chunk_bytes: self.chunk_bytes,
+                    file_size: self.file_size,
+                    read_bytes: self.read_bytes,
+                    start_offset: self.start_offset,
+                }));
+            }
         }
         read_poll
     }

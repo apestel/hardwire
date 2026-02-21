@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ struct RescanSignal {
 #[derive(Clone, Debug)]
 pub struct FileIndexer {
     pub files: Arc<Mutex<Option<Vec<FileInfo>>>>,
+    /// Flat map: absolute_path → file_size, rebuilt on every scan.
+    pub path_cache: Arc<Mutex<HashMap<String, u64>>>,
     signal_tx: Sender<RescanSignal>,
 }
 
@@ -45,14 +48,20 @@ impl FileIndexer {
 
         let files: Arc<Mutex<Option<Vec<FileInfo>>>> = Arc::new(Mutex::new(Some(vec![])));
         let files_clone = Arc::clone(&files);
+        let path_cache: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+        let path_cache_clone = Arc::clone(&path_cache);
         let base_path_clone = Arc::clone(&base_path);
 
         thread::spawn(move || {
             let do_scan = |done_tx: Option<oneshot::Sender<()>>| {
                 match rec_scan_dir(&base_path_clone, &base_path_clone) {
                     Ok(dir_structure) => {
+                        let mut cache = HashMap::new();
+                        collect_file_sizes(&dir_structure, &base_path_clone, &mut cache);
                         let mut output = files_clone.lock().unwrap();
                         *output = Some(dir_structure);
+                        let mut pc = path_cache_clone.lock().unwrap();
+                        *pc = cache;
                     }
                     Err(e) => eprintln!("Error scanning directory: {}", e),
                 }
@@ -81,6 +90,7 @@ impl FileIndexer {
 
         FileIndexer {
             files,
+            path_cache,
             signal_tx: rescan_tx,
         }
     }
@@ -91,6 +101,29 @@ impl FileIndexer {
         match self.signal_tx.send(RescanSignal { done_tx: Some(done_tx) }) {
             Ok(()) => Some(done_rx),
             Err(_) => None,
+        }
+    }
+
+    /// Look up the cached file size for an absolute path. Returns `None` on cache miss.
+    pub fn get_file_size(&self, abs_path: &str) -> Option<u64> {
+        self.path_cache.lock().ok()?.get(abs_path).copied()
+    }
+}
+
+/// Walk the FileInfo tree and populate `cache` with absolute_path → size for all files.
+fn collect_file_sizes(
+    entries: &[FileInfo],
+    base_path: &Path,
+    cache: &mut HashMap<String, u64>,
+) {
+    for entry in entries {
+        if entry.is_dir {
+            if let Some(children) = &entry.children {
+                collect_file_sizes(children, base_path, cache);
+            }
+        } else if let Some(size) = entry.size {
+            let abs = base_path.join(&entry.full_path).to_string_lossy().into_owned();
+            cache.insert(abs, size);
         }
     }
 }

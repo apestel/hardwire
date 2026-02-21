@@ -30,7 +30,6 @@ use std::fs::File;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use std::path::PathBuf;
 
 use askama::Template;
 use axum::body::Body;
@@ -99,13 +98,20 @@ impl App {
 
 impl App {}
 
-async fn init_db(db_path: PathBuf) -> Db {
+async fn init_db(db_config: &config::DatabaseConfig) -> Db {
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
-        .filename(db_path)
-        .create_if_missing(true);
+        .filename(&db_config.path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(db_config.acquire_timeout_secs));
 
-    // opts.disable_statement_logging();
-    let db = match Db::connect_with(opts).await {
+    let db = match sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(db_config.max_connections)
+        .min_connections(db_config.min_connections)
+        .acquire_timeout(std::time::Duration::from_secs(db_config.acquire_timeout_secs))
+        .connect_with(opts)
+        .await
+    {
         Ok(db) => db,
         Err(e) => {
             panic!("Failed to connect to SQLx database: {}", e);
@@ -218,13 +224,18 @@ async fn head_file(
         Err(_) => return Err(not_found().await),
     };
 
-    let file = match tokio::fs::File::open(file_path.clone()).await {
-        Ok(file) => file,
-        Err(_) => return Err(not_found().await),
-    };
-    let file_size = match file.metadata().await {
-        Ok(m) => m.len(),
-        Err(_) => return Err(not_found().await),
+    // Try the in-memory indexer cache before opening the file just for metadata.
+    let file_size = if let Some(size) = app_state.indexer.get_file_size(&file_path) {
+        size
+    } else {
+        let file = match tokio::fs::File::open(&file_path).await {
+            Ok(file) => file,
+            Err(_) => return Err(not_found().await),
+        };
+        match file.metadata().await {
+            Ok(m) => m.len(),
+            Err(_) => return Err(not_found().await),
+        }
     };
 
     let mut headers = HeaderMap::new();
@@ -260,16 +271,21 @@ async fn download_file(
         Err(_) => return Err(not_found().await),
     };
 
-    let mut file = match tokio::fs::File::open(file_path.clone()).await {
+    let mut file = match tokio::fs::File::open(&file_path).await {
         Ok(file) => file,
         Err(_) => return Err(not_found().await),
     };
-    let file_size = match file.metadata().await {
-        Ok(m) => m.len(),
-        Err(e) => return Ok((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read file metadata: {}", e),
-        ).into_response()),
+    // Try the in-memory indexer cache before calling fstat on the open file.
+    let file_size = if let Some(size) = app_state.indexer.get_file_size(&file_path) {
+        size
+    } else {
+        match file.metadata().await {
+            Ok(m) => m.len(),
+            Err(e) => return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read file metadata: {}", e),
+            ).into_response()),
+        }
     };
     // Stable ID across range requests: same client downloading same file in same share
     let transaction_id = {
@@ -428,7 +444,7 @@ async fn main() -> Result<()> {
     config
         .validate()
         .context("Configuration validation failed")?;
-    let db_pool = init_db(config.database.path.clone()).await;
+    let db_pool = init_db(&config.database).await;
 
     if cli.files.is_empty() && !cli.server {
         // let out = std::io::stdout();
