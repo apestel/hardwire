@@ -60,10 +60,10 @@ export const fetchFiles = () => apiFetch<FileInfo[]>('/admin/api/list_files');
 export const rescanFiles = () =>
 	apiFetch<void>('/admin/api/files/rescan', { method: 'POST' });
 
-export const createSharedLink = (file_path: string, expires_at?: number) =>
+export const createSharedLink = (file_paths: string[], expires_at?: number) =>
 	apiFetch<SharedLinkResponse>('/admin/api/create_shared_link', {
 		method: 'POST',
-		body: JSON.stringify({ file_path, expires_at }),
+		body: JSON.stringify({ file_paths, expires_at }),
 	});
 
 export const createTask = (input: CreateArchiveInput) =>

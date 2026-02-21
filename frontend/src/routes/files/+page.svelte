@@ -76,16 +76,11 @@
 	}
 
 	async function handleCreateShareLinks() {
-		const paths = [...selected];
-		const urls: string[] = [];
-		for (const path of paths) {
-			const link = await createSharedLink(path);
-			urls.push(link.url);
-		}
-		await copyToClipboard(urls.join('\n'));
+		const link = await createSharedLink([...selected]);
+		await copyToClipboard(link.url);
 		notifications.add({
 			kind: 'success',
-			message: `${urls.length} share link(s) copied to clipboard`,
+			message: 'Share link copied to clipboard',
 			dismissible: true,
 			autoDismissMs: 5000,
 		});
@@ -139,7 +134,7 @@
 					if (task.archive_path) {
 						let link: { url: string } | null = null;
 						try {
-							link = await createSharedLink(task.archive_path);
+							link = await createSharedLink([task.archive_path]);
 						} catch (e) {
 							console.error('createSharedLink failed:', e);
 						}
@@ -195,7 +190,7 @@
 					onclick={handleCreateShareLinks}
 					class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg transition-colors"
 				>
-					Create Share Links
+					Create Share Link
 				</button>
 				<button
 					onclick={handleCreateArchive}

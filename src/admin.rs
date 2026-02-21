@@ -457,7 +457,7 @@ pub async fn list_files(
 
 #[derive(Debug, Deserialize)]
 pub struct CreateSharedLinkRequest {
-    file_path: String,
+    file_paths: Vec<String>,
     expires_at: Option<i64>,
 }
 
@@ -473,48 +473,58 @@ pub async fn create_shared_link(
     State(app): State<App>,
     Json(request): Json<CreateSharedLinkRequest>,
 ) -> Result<Json<SharedLinkResponse>, AppError> {
-    // file_path from the indexer is relative to data_dir — resolve to absolute
-    let abs_path = app.config.server.data_dir.join(&request.file_path);
-    let path = abs_path.to_string_lossy().to_string();
-
-    let metadata = tokio::fs::metadata(&abs_path)
-        .await
-        .map_err(|_| AppError::FileNotFound(path.clone()))?;
-    let file_size = metadata.len() as i64;
+    if request.file_paths.is_empty() {
+        return Err(AppError::ValidationError("file_paths must not be empty".into()));
+    }
 
     let now = chrono::Utc::now().timestamp();
     let expires_at = request.expires_at.unwrap_or(now + 86400 * 7);
-
-    let file_id = sqlx::query!(
-        "INSERT INTO files (sha256, path, file_size) VALUES (?, ?, ?)",
-        "",
-        path,
-        file_size
-    )
-    .execute(&app.db_pool)
-    .await
-    .map_err(AppError::Database)?
-    .last_insert_rowid();
-
     let share_id = nanoid::nanoid!(10);
+
+    let mut tx = app.db_pool.begin().await.map_err(AppError::Database)?;
+
     sqlx::query!(
         "INSERT INTO share_links (id, expiration, created_at) VALUES (?, ?, ?)",
         share_id,
         expires_at,
         now
     )
-    .execute(&app.db_pool)
+    .execute(&mut *tx)
     .await
     .map_err(AppError::Database)?;
 
-    sqlx::query!(
-        "INSERT INTO share_link_files (share_link_id, file_id) VALUES (?, ?)",
-        share_id,
-        file_id
-    )
-    .execute(&app.db_pool)
-    .await
-    .map_err(AppError::Database)?;
+    for file_path in &request.file_paths {
+        // file_path from the indexer is relative to data_dir — resolve to absolute
+        let abs_path = app.config.server.data_dir.join(file_path);
+        let path = abs_path.to_string_lossy().to_string();
+
+        let metadata = tokio::fs::metadata(&abs_path)
+            .await
+            .map_err(|_| AppError::FileNotFound(path.clone()))?;
+        let file_size = metadata.len() as i64;
+
+        let file_id = sqlx::query!(
+            "INSERT INTO files (sha256, path, file_size) VALUES (?, ?, ?)",
+            "",
+            path,
+            file_size
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?
+        .last_insert_rowid();
+
+        sqlx::query!(
+            "INSERT INTO share_link_files (share_link_id, file_id) VALUES (?, ?)",
+            share_id,
+            file_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::Database)?;
+    }
+
+    tx.commit().await.map_err(AppError::Database)?;
 
     let url = format!("{}/s/{}", app.config.server.host, share_id);
 
