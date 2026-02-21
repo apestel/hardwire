@@ -67,7 +67,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
             self.read_bytes += newly_read;
             self.bytes_since_last_event += newly_read;
             let is_eof = newly_read == 0;
-            if self.bytes_since_last_event >= PROGRESS_REPORT_THRESHOLD || is_eof {
+            let is_complete = self.file_size > 0
+                && (self.start_offset + self.read_bytes as u64) >= self.file_size;
+            if self.bytes_since_last_event >= PROGRESS_REPORT_THRESHOLD || is_eof || is_complete {
                 self.bytes_since_last_event = 0;
                 let _ = self.channel_sender.send(Event::DownloadProgress(FileDownload {
                     file_path: self.file_path.clone(),

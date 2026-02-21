@@ -563,6 +563,7 @@ pub struct PeriodData {
 pub struct PeriodQuery {
     pub period: Option<String>,
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -589,7 +590,7 @@ pub async fn download_stats(
     .map_err(AppError::Database)?;
 
     let completed_downloads: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM download WHERE status = 'completed'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM download WHERE status = 'complete'")
             .fetch_one(&app.db_pool)
             .await
             .map_err(AppError::Database)?;
@@ -664,11 +665,13 @@ pub async fn recent_downloads(
     Query(query): Query<PeriodQuery>,
 ) -> Result<Json<Vec<DownloadRecord>>, AppError> {
     let limit = query.limit.unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
 
     let downloads: Vec<DownloadRecord> = sqlx::query_as(
-        "SELECT id, file_path, ip_address, transaction_id, status, file_size, started_at, finished_at FROM download ORDER BY finished_at DESC NULLS LAST, started_at DESC LIMIT ?"
+        "SELECT id, file_path, ip_address, transaction_id, status, file_size, started_at, finished_at FROM download ORDER BY finished_at DESC NULLS LAST, started_at DESC LIMIT ? OFFSET ?"
     )
     .bind(limit)
+    .bind(offset)
     .fetch_all(&app.db_pool)
     .await
     .map_err(AppError::Database)?;

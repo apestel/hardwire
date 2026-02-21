@@ -11,7 +11,9 @@
 	let period = $state<'day' | 'week' | 'month'>('month');
 	// eslint-disable-next-line svelte/state_referenced_locally
 	let chartData = $state<DownloadsByPeriod>(data.byPeriod);
+	const PAGE_SIZE = 100;
 	let recentRows = $state<DownloadRecord[]>(data.recent);
+	let page = $state(0);
 	let fromDate = $state('');
 	let toDate = $state('');
 	let refreshingTable = $state(false);
@@ -54,10 +56,11 @@
 		}
 	}
 
-	async function refreshTable() {
+	async function refreshTable(targetPage = page) {
 		refreshingTable = true;
 		try {
-			recentRows = await fetchRecentDownloads(100);
+			recentRows = await fetchRecentDownloads(PAGE_SIZE, targetPage * PAGE_SIZE);
+			page = targetPage;
 		} finally {
 			refreshingTable = false;
 		}
@@ -132,18 +135,35 @@
 				</svg>
 			</div>
 		{/if}
-		<div class="flex items-center justify-between mb-4">
+		<div class="flex items-center justify-between mb-4 flex-wrap gap-3">
 			<h2 class="text-lg font-semibold text-white">Recent Downloads</h2>
-			<button
-				onclick={refreshTable}
-				disabled={refreshingTable}
-				class="flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
-			>
-				<svg class="size-3.5 {refreshingTable ? 'animate-spin' : ''}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-				</svg>
-				Refresh
-			</button>
+			<div class="flex items-center gap-2">
+				<button
+					onclick={() => refreshTable(page - 1)}
+					disabled={refreshingTable || page === 0}
+					class="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
+				>
+					← Prev
+				</button>
+				<span class="text-gray-400 text-sm tabular-nums">Page {page + 1}</span>
+				<button
+					onclick={() => refreshTable(page + 1)}
+					disabled={refreshingTable || recentRows.length < PAGE_SIZE}
+					class="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
+				>
+					Next →
+				</button>
+				<button
+					onclick={() => refreshTable(page)}
+					disabled={refreshingTable}
+					class="flex items-center gap-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white text-sm px-3 py-1.5 rounded-lg transition-colors"
+				>
+					<svg class="size-3.5 {refreshingTable ? 'animate-spin' : ''}" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+					</svg>
+					Refresh
+				</button>
+			</div>
 		</div>
 		<RecentDownloadsTable rows={recentRows} />
 	</div>

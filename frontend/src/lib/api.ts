@@ -49,8 +49,8 @@ export const fetchDownloadsByPeriod = (period: string, limit = 30) =>
 		`/admin/api/stats/downloads/by_period?period=${period}&limit=${limit}`,
 	);
 
-export const fetchRecentDownloads = (limit = 100) =>
-	apiFetch<DownloadRecord[]>(`/admin/api/stats/downloads/recent?limit=${limit}`);
+export const fetchRecentDownloads = (limit = 100, offset = 0) =>
+	apiFetch<DownloadRecord[]>(`/admin/api/stats/downloads/recent?limit=${limit}&offset=${offset}`);
 
 export const fetchStatusDistribution = () =>
 	apiFetch<StatusDistribution[]>('/admin/api/stats/downloads/status');

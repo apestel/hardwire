@@ -12,6 +12,14 @@
 		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
 		return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 	}
+
+	function formatSpeed(row: DownloadRecord) {
+		if (!row.file_size || !row.finished_at || row.started_at >= row.finished_at) return '—';
+		const secs = row.finished_at - row.started_at;
+		const bps = row.file_size / secs;
+		if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(0)} KB/s`;
+		return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+	}
 </script>
 
 {#if rows.length === 0}
@@ -25,6 +33,7 @@
 					<th class="pb-2 pr-4 font-medium">IP</th>
 					<th class="pb-2 pr-4 font-medium">Status</th>
 					<th class="pb-2 pr-4 font-medium">Size</th>
+					<th class="pb-2 pr-4 font-medium">Speed</th>
 					<th class="pb-2 pr-4 font-medium">Started</th>
 					<th class="pb-2 font-medium">Finished</th>
 				</tr>
@@ -49,6 +58,7 @@
 							</span>
 						</td>
 						<td class="py-2 pr-4 text-gray-400">{formatSize(row.file_size)}</td>
+						<td class="py-2 pr-4 text-gray-400 whitespace-nowrap">{formatSpeed(row)}</td>
 						<td class="py-2 pr-4 text-gray-400 whitespace-nowrap">{formatTs(row.started_at)}</td>
 						<td class="py-2 text-gray-400 whitespace-nowrap">{row.finished_at ? formatTs(row.finished_at) : '—'}</td>
 					</tr>
