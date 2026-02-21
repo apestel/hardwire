@@ -82,7 +82,15 @@
 		/>
 	</div>
 
-	<div class="bg-gray-900 border border-gray-800 rounded-xl p-6">
+	<div class="relative bg-gray-900 border border-gray-800 rounded-xl p-6">
+		{#if refreshingChart}
+			<div class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-gray-900/60 backdrop-blur-sm">
+				<svg class="size-6 animate-spin text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+				</svg>
+			</div>
+		{/if}
 		<div class="flex items-center justify-between mb-4 flex-wrap gap-3">
 			<h2 class="text-lg font-semibold text-white">Downloads Over Time</h2>
 			<div class="flex items-center gap-3 flex-wrap">
@@ -115,7 +123,15 @@
 		<DownloadsChart data={chartData} />
 	</div>
 
-	<div class="bg-gray-900 border border-gray-800 rounded-xl p-6">
+	<div class="relative bg-gray-900 border border-gray-800 rounded-xl p-6">
+		{#if refreshingTable}
+			<div class="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-gray-900/60 backdrop-blur-sm">
+				<svg class="size-6 animate-spin text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+				</svg>
+			</div>
+		{/if}
 		<div class="flex items-center justify-between mb-4">
 			<h2 class="text-lg font-semibold text-white">Recent Downloads</h2>
 			<button
