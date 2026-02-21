@@ -287,13 +287,8 @@ async fn download_file(
             ).into_response()),
         }
     };
-    // Stable ID across range requests: same client downloading same file in same share
-    let transaction_id = {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(format!("{}:{}:{}", share_id, file_id, ip_address));
-        format!("{:x}", h.finalize())[..16].to_string()
-    };
+    // Unique ID per download request so each download gets its own tracking entry
+    let transaction_id = uuid::Uuid::new_v4().to_string();
 
     // Handle range request
     let (start, end) = if let Some(range) = headers.get(RANGE) {
