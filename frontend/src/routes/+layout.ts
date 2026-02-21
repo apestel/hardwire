@@ -16,8 +16,5 @@ export function load({ url }: { url: URL }) {
 	if (!isAuthenticated() && !isAuthRoute && !isLoginPage) {
 		redirect(302, base || '/');
 	}
-	if (isAuthenticated() && isLoginPage) {
-		redirect(302, `${base}/dashboard`);
-	}
 	return {};
 }
