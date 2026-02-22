@@ -2,6 +2,8 @@ use anyhow::Result;
 use sevenzip_mt::{Lzma2Config, SevenZipWriter};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time;
 use walkdir::WalkDir;
@@ -14,19 +16,36 @@ pub struct TaskWorker {
     data_dir: PathBuf,
 }
 
-/// Minimal progress token — only tracks whether the archive job is done.
-/// sevenzip-mt compresses everything in one blocking call with no progress callbacks,
-/// so we report progress = 0 (indeterminate) until completion.
+/// Tracks archive compression progress via an atomic percentage.
+/// 0–99 = compression percentage, 255 = done sentinel.
 #[derive(Clone)]
 struct ArchiveProgress {
-    is_complete: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    percentage: Arc<AtomicU8>,
 }
+
+const DONE_SENTINEL: u8 = 255;
 
 impl ArchiveProgress {
     fn new() -> Self {
         Self {
-            is_complete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            percentage: Arc::new(AtomicU8::new(0)),
         }
+    }
+
+    fn set_percentage(&self, pct: u8) {
+        self.percentage.store(pct, Ordering::Relaxed);
+    }
+
+    fn get_percentage(&self) -> u8 {
+        self.percentage.load(Ordering::Relaxed)
+    }
+
+    fn mark_complete(&self) {
+        self.percentage.store(DONE_SENTINEL, Ordering::Relaxed);
+    }
+
+    fn is_complete(&self) -> bool {
+        self.percentage.load(Ordering::Relaxed) == DONE_SENTINEL
     }
 }
 
@@ -66,31 +85,27 @@ impl TaskWorker {
 
         match input {
             TaskInput::CreateArchive(archive_input) => {
-                // Create progress tracker (indeterminate — sevenzip-mt has no progress callbacks)
                 let progress = ArchiveProgress::new();
                 let progress_clone = progress.clone();
 
-                // Spawn progress monitoring task — keeps task alive in DB while compressing
+                // Spawn progress monitoring task
                 let task_manager = self.task_manager.clone();
                 let task_id_clone = task_id.to_string();
                 tokio::spawn(async move {
-                    while !progress_clone
-                        .is_complete
-                        .load(std::sync::atomic::Ordering::Relaxed)
-                    {
-                        // Report progress = 0 (indeterminate) until done
+                    while !progress_clone.is_complete() {
+                        let pct = progress_clone.get_percentage();
                         if let Err(e) = task_manager
                             .update_task_status(
                                 &task_id_clone,
                                 TaskStatus::Running,
                                 None,
-                                Some(0),
+                                Some(pct as i32),
                             )
                             .await
                         {
                             log::error!("Failed to update task progress: {}", e);
                         }
-                        time::sleep(time::Duration::from_secs(10)).await;
+                        time::sleep(time::Duration::from_secs(2)).await;
                     }
                 });
 
@@ -130,10 +145,8 @@ impl TaskWorker {
                     Err(anyhow::anyhow!("Either directory or files must be specified"))
                 };
 
-                // Always stop the monitoring goroutine, whether success or failure
-                progress
-                    .is_complete
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Always stop the monitoring task, whether success or failure
+                progress.mark_complete();
 
                 let result = archive_result?;
 
@@ -174,7 +187,7 @@ async fn create_7z_archive_with_progress<P: AsRef<Path>>(
     source: Vec<P>,
     output_path: PathBuf,
     _password: Option<String>,
-    _progress: ArchiveProgress,
+    progress: ArchiveProgress,
 ) -> Result<PathBuf> {
     // Ensure output path has .7z extension
     let output_path = if !output_path.extension().map_or(false, |ext| ext == "7z") {
@@ -226,7 +239,10 @@ async fn create_7z_archive_with_progress<P: AsRef<Path>>(
         }
 
         archive
-            .finish()
+            .finish_with_progress(move |info| {
+                let pct = (info.percentage * 100.0) as u8;
+                progress.set_percentage(pct.min(99));
+            })
             .map_err(|e| anyhow::anyhow!("Failed to finish archive: {e}"))?;
 
         Ok::<_, anyhow::Error>(())

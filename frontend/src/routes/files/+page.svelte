@@ -125,6 +125,10 @@
 			try {
 				const task = await getTaskStatus(task_id);
 
+				if (task.status === 'Running' && task.progress > 0) {
+					notifications.updateProgress(notifId, task.progress, `Creating archive... ${task.progress}%`);
+				}
+
 				if (task.status === 'Completed') {
 					clearInterval(interval);
 
