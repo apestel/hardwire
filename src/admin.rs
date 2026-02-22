@@ -230,6 +230,7 @@ pub async fn google_callback(
             AppError::AuthError(AuthErrorKind::OAuthError("No email in claims".to_string()))
         })?;
 
+    // Look up user by google_id first (returning login), then by email (first-time login)
     let user = sqlx::query_as!(
         AdminUser,
         "SELECT * FROM admin_users WHERE google_id = ?",
@@ -242,25 +243,39 @@ pub async fn google_callback(
     let user = match user {
         Some(u) => u,
         None => {
-            let now = chrono::Utc::now().timestamp();
-            sqlx::query!(
-                "INSERT INTO admin_users (email, google_id, created_at) VALUES (?, ?, ?)",
-                email,
-                google_id,
-                now
+            // First login: check if this email was pre-authorized via create_user
+            let existing = sqlx::query_as!(
+                AdminUser,
+                "SELECT * FROM admin_users WHERE email = ?",
+                email
             )
-            .execute(&app.db_pool)
+            .fetch_optional(&app.db_pool)
             .await
             .map_err(AppError::Database)?;
 
-            sqlx::query_as!(
-                AdminUser,
-                "SELECT * FROM admin_users WHERE google_id = ?",
-                google_id
-            )
-            .fetch_one(&app.db_pool)
-            .await
-            .map_err(AppError::Database)?
+            match existing {
+                Some(u) => {
+                    // Link the Google account to the pre-authorized user
+                    sqlx::query!(
+                        "UPDATE admin_users SET google_id = ? WHERE id = ?",
+                        google_id,
+                        u.id
+                    )
+                    .execute(&app.db_pool)
+                    .await
+                    .map_err(AppError::Database)?;
+                    u
+                }
+                None => {
+                    tracing::warn!(
+                        email = %email,
+                        "OAuth login denied: email not in admin_users allow-list"
+                    );
+                    return Ok(Redirect::to(
+                        "/admin/auth/done?error=Your+email+is+not+authorized.+Contact+an+administrator.",
+                    ));
+                }
+            }
         }
     };
 

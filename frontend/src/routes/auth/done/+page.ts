@@ -8,6 +8,11 @@ export const ssr = false;
 export async function load({ url }: { url: URL }) {
 	if (!browser) return {};
 
+	const error = url.searchParams.get('error');
+	if (error) {
+		return { error };
+	}
+
 	const token = url.searchParams.get('token');
 
 	if (!token) {
