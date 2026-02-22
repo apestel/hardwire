@@ -33,7 +33,7 @@ build: db-migrate
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "dev")
 IMAGE    := pestouille/hardwire
 
-push: 
+push:
 	docker build --platform linux/amd64 \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \
@@ -49,3 +49,6 @@ tag:
 	git tag -a v$(V) -m "Release v$(V)"
 	git push origin v$(V)
 	@echo "Tagged v$(V) and pushed — GitHub Actions will build and deploy"
+
+test:
+	DATABASE_URL=sqlite://data/db.sqlite cargo test
