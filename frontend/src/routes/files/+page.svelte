@@ -9,6 +9,7 @@
 
 	let selected = $state<Set<string>>(new Set());
 	let scanning = $state(false);
+	let searchQuery = $state('');
 
 	type SortField = 'name' | 'modified_at' | 'created_at' | 'size';
 	type SortDir = 'asc' | 'desc';
@@ -39,7 +40,22 @@
 			);
 	}
 
-	let sortedFiles = $derived(sortNodes(data.files));
+	function filterNodes(nodes: FileInfo[], query: string): FileInfo[] {
+		if (!query) return nodes;
+		const lower = query.toLowerCase();
+		return nodes
+			.map((node) => {
+				if (node.is_dir && node.children) {
+					const filtered = filterNodes(node.children, query);
+					if (filtered.length > 0) return { ...node, children: filtered };
+				}
+				if (node.name.toLowerCase().includes(lower)) return node;
+				return null;
+			})
+			.filter((n): n is FileInfo => n !== null);
+	}
+
+	let sortedFiles = $derived(filterNodes(sortNodes(data.files), searchQuery));
 
 	function toggleSort(field: SortField) {
 		if (sortField === field) {
@@ -215,6 +231,18 @@
 				</svg>
 			</div>
 		{/if}
+		<div class="relative mb-3">
+			<svg class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-gray-500 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+				<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z" />
+			</svg>
+			<input
+				type="text"
+				bind:value={searchQuery}
+				placeholder="Search files…"
+				class="w-full bg-gray-800 border border-gray-700 text-white text-sm rounded-lg pl-9 pr-3 py-1.5 placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
+			/>
+		</div>
+
 		<div class="flex items-center gap-1 mb-3 text-xs text-gray-500">
 			<span>Sort:</span>
 			{#each Object.entries(sortLabels) as [field, label]}
@@ -235,7 +263,11 @@
 
 		{#if sortedFiles.length === 0}
 			<p class="text-gray-500 text-sm text-center py-8">
-				No files indexed yet. Files will appear once the indexer has scanned the data directory.
+				{#if searchQuery}
+					No files matching "{searchQuery}"
+				{:else}
+					No files indexed yet. Files will appear once the indexer has scanned the data directory.
+				{/if}
 			</p>
 		{:else}
 			<FileTree nodes={sortedFiles} {selected} {toggleSelect} />
