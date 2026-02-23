@@ -30,7 +30,7 @@ axum-tracing-opentelemetry = { version = "0.33.0" }
 url = "2.5.8"
 http = "1.4.0"
 tempfile = "3.25.0"
-sevenzip-mt = "0.2.0"
+sevenzip-mt = "0.2.2"
 
 # opentelemetry-http = "0.13.0"
 opentelemetry-otlp = { version = "0.31.0", default-features = true }

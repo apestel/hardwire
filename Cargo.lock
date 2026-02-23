@@ -3216,9 +3216,9 @@ dependencies = [
 
 [[package]]
 name = "sevenzip-mt"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3962a8590b14c6b2ebacb01de5f83a676037c2e0a2237da7e7a8460b6028ccf"
+checksum = "42dd0691f598334b3df20f6350318182deac7879ba61033146ce560d72923f74"
 dependencies = [
  "byteorder",
  "clap",
