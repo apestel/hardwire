@@ -16,7 +16,6 @@ use tower_http::services::ServeDir;
 use tracing::instrument;
 
 use openidconnect::{Nonce, PkceCodeVerifier};
-use openidconnect::core::CoreProviderMetadata;
 
 use std::collections::HashMap;
 
@@ -73,7 +72,6 @@ struct App {
     indexer: file_indexer::FileIndexer,
     config: Config,
     pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier, i64)>>>,
-    oidc_metadata: Arc<tokio::sync::OnceCell<CoreProviderMetadata>>,
 }
 
 impl App {
@@ -91,7 +89,6 @@ impl App {
             indexer,
             config,
             pending_auths: Arc::new(Mutex::new(HashMap::new())),
-            oidc_metadata: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 }

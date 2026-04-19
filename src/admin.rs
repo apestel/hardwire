@@ -110,32 +110,27 @@ pub struct AuthCallbackQuery {
 }
 
 /// Returns cached OIDC provider metadata. Discovery is performed once and reused.
-async fn oidc_provider_metadata(app: &App) -> Result<CoreProviderMetadata, AppError> {
-    app.oidc_metadata
-        .get_or_try_init(|| async {
-            let http_client = reqwest::ClientBuilder::new()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| {
-                    AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e))
-                })?;
-            let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
-                .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
-            CoreProviderMetadata::discover_async(issuer_url, &http_client)
-                .await
-                .map_err(|e| {
-                    AppError::AuthError(AuthErrorKind::OAuthError(format!(
-                        "Discovery failed: {:?}",
-                        e
-                    )))
-                })
-        })
+async fn discover_oidc_metadata() -> Result<CoreProviderMetadata, AppError> {
+    let http_client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e))
+        })?;
+    let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
+        .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
+    CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
-        .cloned()
+        .map_err(|e| {
+            AppError::AuthError(AuthErrorKind::OAuthError(format!(
+                "Discovery failed: {:?}",
+                e
+            )))
+        })
 }
 
 pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> {
-    let metadata = oidc_provider_metadata(&app).await?;
+    let metadata = discover_oidc_metadata().await?;
     let client_id = ClientId::new(app.config.auth.google_client_id.clone());
     let client_secret = ClientSecret::new(app.config.auth.google_client_secret.clone());
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
@@ -177,7 +172,7 @@ pub async fn google_callback(
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
 
-    let metadata = oidc_provider_metadata(&app).await?;
+    let metadata = discover_oidc_metadata().await?;
     let client_id = ClientId::new(app.config.auth.google_client_id.clone());
     let client_secret = ClientSecret::new(app.config.auth.google_client_secret.clone());
     let redirect_url = RedirectUrl::new(app.config.auth.google_redirect_url.clone())
