@@ -1,1 +1,22 @@
-target/**
+# VCS
+.git
+
+# Rust build artifacts
+target
+
+# Frontend: the image runs `npm ci` itself — never let the host's
+# node_modules (platform-specific native bindings, e.g. Rolldown for
+# Vite 8) overwrite it via `COPY ./frontend ./`
+frontend/node_modules
+frontend/.svelte-kit
+
+# SPA is built inside the image; only host-built dist/css is consumed
+dist/admin
+
+# Local data / scratch databases — must never leak into the image
+data
+.sqlx-test
+*.sqlite
+
+# Not needed in the image
+.github
