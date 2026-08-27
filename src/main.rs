@@ -308,6 +308,25 @@ async fn healthcheck() -> impl IntoResponse {
     "OK"
 }
 
+/// Build metadata baked at compile time (see build.rs). Used by the
+/// deployment pipeline to verify the running container matches the
+/// released image, and by operators with `hardwire --version`.
+const APP_VERSION: &str = env!("APP_VERSION");
+const APP_GIT_SHA: &str = env!("APP_GIT_SHA");
+
+/// `GET /version` — machine-readable build info. Public but unrate-limited:
+/// it is polled by the deployment tooling after each release. Empty values
+/// (local builds without build-args) fall back to "dev"/"unknown".
+async fn version_info() -> axum::Json<serde_json::Value> {
+    let version = if APP_VERSION.is_empty() { "dev" } else { APP_VERSION };
+    let git_sha = if APP_GIT_SHA.is_empty() { "unknown" } else { APP_GIT_SHA };
+    axum::Json(serde_json::json!({
+        "name": "hardwire",
+        "version": version,
+        "git_sha": git_sha,
+    }))
+}
+
 async fn head_file(
     State(app_state): State<App>,
     Path((share_id, file_id)): Path<(String, u32)>,
@@ -671,6 +690,7 @@ async fn main() -> Result<()> {
             .with_state(app_state.clone());
 
         let app = axum::Router::new()
+            .route("/version", get(version_info))
             .merge(public_router)
             .nest_service("/assets", ServeDir::new("dist/"))
             .nest("/admin", admin::admin_router())

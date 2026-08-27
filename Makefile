@@ -50,14 +50,21 @@ IMAGE    := pestouille/hardwire
 
 push:
 	docker build --platform linux/amd64 \
+		--build-arg APP_VERSION=$(VERSION) \
+		--build-arg APP_GIT_SHA=$(shell git rev-parse HEAD) \
 		-t $(IMAGE):$(VERSION) \
 		-t $(IMAGE):latest \
 		.
 	docker push $(IMAGE):$(VERSION)
 	docker push $(IMAGE):latest
 
+# Production deployment no longer lives in this (public) repository.
+# Push a release tag, then run scripts/release.sh in the private
+# `hardwire-deploy` repository — Doco-CD on the production server picks
+# up the new image and redeploys (see that repo's README for details).
 deploy:
-	ssh orion 'cd /opt/apps/services && IMAGE_TAG=$(VERSION) docker compose pull hardwire && docker compose up -d hardwire'
+	@echo "Deploy is handled by the private 'hardwire-deploy' repo."
+	@echo "→ in hardwire-deploy: scripts/release.sh [--version X] [--wait]"
 
 tag:
 	@test -n "$(V)" || (echo "Usage: make tag V=1.2.3"; exit 1)

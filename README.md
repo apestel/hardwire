@@ -65,6 +65,15 @@ After this setup, you can use the admin API to manage other admin users.
 | OTEL_EXPORTER_OTLP_TRACES_PROTOCOL | http/protobuf | OpenTelemetry Traces Protocol |
 | OTEL_EXPORTER_OTLP_TRACES_ENDPOINT | OTEL_EXPORTER_OTLP_ENDPOINT or http://localhost:4318 (protobuf) or http://localhost:4317 | Opentelemetry exporter endpoint |
 | OTEL_RESOURCE_ATTRIBUTES | No default value | service.name=rust-app (you can name it whatever you want) |
+
+## Deployment
+
+The public repository only builds and publishes the Docker image
+(`make tag V=x.y.z` → GitHub Actions → Docker Hub). Production deployment is
+handled by a separate **private `hardwire-deploy`** repository (GitOps via
+[Doco-CD](https://doco.cd/)): it pins the exact image digest per release,
+and the production server redeploys automatically on push. Server
+credentials and runtime secrets never live in this public repo.
 ## Recent Architecture Improvements (2024-10-19)
 
 The project has undergone significant architecture improvements. See [IMPROVEMENTS.md](./IMPROVEMENTS.md) for complete details.

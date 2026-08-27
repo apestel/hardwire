@@ -57,7 +57,7 @@ dist/admin/        # Built SvelteKit SPA — served at /admin (gitignored)
 .sqlx/             # sqlx offline query cache (committed, updated via `cargo sqlx prepare`)
 .github/workflows/
   ci.yml           # Build + test on push to main/wip and PRs
-  release.yml      # Build Docker image, push to Hub, deploy via SSH on v* tags
+  release.yml      # Build Docker image, push to Hub on v* tags (deployment lives in the private hardwire-deploy repo)
 tests/
   common/mod.rs    # TestContext, DB seeding helpers
   integration_test.rs
@@ -81,6 +81,7 @@ tests/
 - `GET /s/:share_id` — download page (Askama template)
 - `GET /s/:share_id/:file_id` — file download (range requests supported)
 - `HEAD /s/:share_id/:file_id` — file metadata
+- `GET /version` — build info JSON `{name, version, git_sha}` (baked at compile time via `build.rs`); polled by the deployment pipeline, not rate-limited
 - `GET /assets/*` — static assets (Tower `ServeDir`)
 - `GET /admin/*` — SPA fallback (Tower `ServeDir` → `dist/admin/index.html`)
 
@@ -195,17 +196,30 @@ make all
 
 **Docker:**
 ```sh
-make push            # build linux/amd64 image tagged with git version, push to Hub
-make deploy          # SSH into 'orion', docker compose pull + up hardwire
+make push            # build linux/amd64 image (build-args APP_VERSION/APP_GIT_SHA
+                     # baked into the binary), tagged with git version, push to Hub
+make deploy          # NO-OP hint: deployment moved to the private hardwire-deploy repo
 make tag V=1.2.3     # create+push git tag → triggers GitHub Actions release pipeline
 ```
+
+## Deployment (private repo)
+
+Production deployment is GitOps via the **private `hardwire-deploy`** repository
+(the public repo is on GitHub and holds no server credentials). Flow:
+
+1. `make tag V=x.y.z` → public GHA builds + pushes `pestouille/hardwire:x.y.z` to Docker Hub.
+2. In `hardwire-deploy`: `scripts/release.sh` (latest release by default, `--version X` to target one) resolves the image **digest** from Docker Hub, updates the `HARDWIRE_IMAGE` pointer in `.env`, validates the `releases/<version>.json` manifest, commits + pushes.
+3. **Doco-CD** on the production server (polling the private repo) applies the compose stack; the app self-reports its version on `GET /version` so the pipeline can verify the running container.
+4. Rollback: `scripts/rollback.sh` re-points to the previous image (digest-pinned, immutable).
+
+Runtime secrets (JWT, Google OAuth) live in a local file on the server, never in either repository.
 
 ## CI/CD (GitHub Actions)
 
 - **ci.yml** — runs on push/PR: Rust build+test, sqlx cache check, frontend type-check+build
-- **release.yml** — triggered by `v*` tags: builds Docker image (`:latest` + `:<version>` + `:<sha>`), pushes to Docker Hub with GHA layer cache, deploys via SSH
+- **release.yml** — triggered by `v*` tags: builds Docker image (`:latest` + `:<version>` + `:<sha>`, with `APP_VERSION`/`APP_GIT_SHA` build-args), pushes to Docker Hub with GHA layer cache. No deployment step — the private `hardwire-deploy` repo drives production (see above)
 
-**Required secrets:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`
+**Required secrets:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` (server credentials no longer live in this repo)
 
 ## SQLx Offline Mode
 
