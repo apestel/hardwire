@@ -8,9 +8,9 @@ Self-hosted file sharing service (WetTransfer-like), written in Rust. Admins cre
 |---|---|
 | Web framework | Axum 0.8 + Tower |
 | Async runtime | Tokio (full) |
-| Database | SQLite via sqlx 0.8 (compile-time macros, built-in migrations) |
-| Templating | Askama 0.14 (compile-time Jinja2-style, HTML) |
-| Auth | Google OIDC (openidconnect 4, PKCE flow) + JWT (jsonwebtoken 10, HS256) |
+| Database | SQLite via sqlx 0.9 (compile-time macros, built-in migrations) |
+| Templating | Askama 0.16 (compile-time Jinja2-style, HTML) |
+| Auth | Google OIDC (openidconnect 4, PKCE flow) + JWT (jsonwebtoken 11, HS256) |
 | Observability | OpenTelemetry (OTLP), tracing, tokio-console |
 | Archiving | sevenz-rust (LZMA2 + AES-256) |
 | Admin frontend | SvelteKit 2 + Svelte 5 (runes) + Tailwind CSS v4 + Chart.js |
@@ -157,6 +157,17 @@ tests/
 
 ## Build
 
+**Local toolchain state (sandbox-safe builds):** the Makefile exports
+`CARGO_HOME=$(PWD)/.cargo`, `CARGO_TARGET_DIR=$(PWD)/target`,
+`NPM_CONFIG_CACHE=$(PWD)/frontend/.npm-cache`, and prepends `.cargo/bin` to
+`PATH` (for locally installed `sqlx`). `frontend/.npmrc` pins the npm cache
+to `frontend/.npm-cache/` for commands run from `frontend/`. Use `make`
+targets so builds write only inside the project (required under restricted
+file sandboxes such as dsh `workspace-write`). Raw `cargo`/`npm` invocations
+outside `make` still use the global `~/.cargo` / `~/.npm` unless you set the
+same env vars. The first `cargo build` after a fresh `.cargo` re-fetches the
+registry and recompiles all dependencies.
+
 ```sh
 # Public CSS
 npx @tailwindcss/cli -i ./static/css/input.css -o ./dist/css/output.css
@@ -165,8 +176,14 @@ npx @tailwindcss/cli -i ./static/css/input.css -o ./dist/css/output.css
 cd frontend && npm install && npm run build   # outputs to dist/admin/
 
 # Database migrations + sqlx offline cache
+# A FRESH database cannot be bootstrapped by `sqlx migrate run` (the embedded
+# runner orders by numeric version, so the 12-digit 202201011537 runs last and
+# the 2025/2026 migrations that need its tables fail — see src/db.rs).
+# Use the binary, which idempotently bootstraps the schema and records every
+# migration before letting the runner apply new ones:
 export DATABASE_URL=sqlite://data/db.sqlite
-sqlx migrate run --source migrations
+./target/release/hardwire --db-init      # or: make db-migrate
+# `sqlx migrate run --source migrations` still works on an EXISTING database.
 cargo sqlx prepare   # must re-run after any sqlx::query! changes
 
 # Release binary
@@ -201,7 +218,14 @@ All errors flow through `AppError` in `src/error/mod.rs`. Maps to appropriate HT
 ## Tests
 
 ```sh
-cargo test
+cargo test                # unit + integration (real SQLite in a TempDir)
+./tests/e2e/run.sh        # full HTTP end-to-end: boots the real server on a
+                          # throwaway DB (.sqlx-test/), then exercises public
+                          # share pages, full/range downloads, JWT auth, the
+                          # Google-login PKCE redirect, stats endpoints, the 7z
+                          # archive task and the WebSocket handshake (27 checks)
 ```
 
 Integration tests in `tests/` spin up a real SQLite DB in a `TempDir` and run all migrations. Use `sqlx::query(...)` (runtime, not macro) in tests to avoid needing `DATABASE_URL`.
+
+The e2e suite (`tests/e2e/`, Python stdlib only) is self-contained: `run.sh` builds nothing, just needs the server binary (`cargo build`) and `python3`. Non-`.rs` files in `tests/` are ignored by cargo. It can't cover the real Google code exchange (needs live credentials) or OTLP export to a real collector.
