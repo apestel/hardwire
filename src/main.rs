@@ -46,6 +46,7 @@ use std::time::Instant;
 
 mod admin;
 mod config;
+mod db;
 mod error;
 mod file_indexer;
 mod pathtools;
@@ -65,6 +66,10 @@ struct Cli {
     /// Files to publish
     #[arg(short, long, num_args=1.., value_names = ["LIST OF FILES"])]
     files: Vec<String>,
+
+    /// Initialize/migrate the database, then exit (fresh-install path, see src/db.rs)
+    #[arg(long)]
+    db_init: bool,
 }
 
 // AppError is now defined in the error module
@@ -205,6 +210,13 @@ async fn init_db(db_config: &config::DatabaseConfig) -> Db {
             panic!("Failed to connect to SQLx database: {}", e);
         }
     };
+
+    // Idempotent schema bootstrap: on a brand-new database the embedded
+    // runner alone can never complete (see src/db.rs), so we repair the
+    // schema and the migration bookkeeping before asking it to run.
+    if let Err(e) = db::bootstrap_schema(&db).await {
+        panic!("Failed to initialize SQLx database schema: {}", e);
+    }
 
     if let Err(e) = sqlx::migrate!().run(&db).await {
         panic!("Failed to initialize SQLx database: {}", e);
@@ -583,6 +595,15 @@ async fn main() -> Result<()> {
     config
         .validate()
         .context("Configuration validation failed")?;
+
+    // `--db-init`: initialize/migrate the database, then exit. Used by CI and
+    // operators on fresh installs.
+    if cli.db_init {
+        let _db = init_db(&config.database).await;
+        println!("database ready: {}", config.database.path.display());
+        return Ok(());
+    }
+
     let db_pool = init_db(&config.database).await;
 
     if cli.files.is_empty() && !cli.server {

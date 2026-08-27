@@ -23,7 +23,10 @@ impl TestContext {
 
         let db_pool = SqlitePool::connect_with(opts).await?;
 
-        // Run migrations using native sqlx system
+        // Idempotent schema bootstrap (fresh databases cannot be bootstrapped
+        // by the embedded migration runner alone — see src/db.rs), then let
+        // the native sqlx runner apply anything still missing.
+        hardwire::db::bootstrap_schema(&db_pool).await?;
         sqlx::migrate!().run(&db_pool).await?;
 
         // Create test configuration

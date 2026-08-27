@@ -1,4 +1,7 @@
 /target
+/frontend/.npm-cache/
+# Local CARGO_HOME (registry + installed sqlx-cli) for sandbox-safe `make` builds
+/.cargo/
 .aider*
 .env
 .idea/
@@ -6,6 +9,7 @@
 .vscode/
 /data
 db.sqlite
+.sqlx-test/
 /dist/admin/
 /dist/html/
 /frontend/node_modules/

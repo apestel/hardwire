@@ -1,4 +1,10 @@
-all: db-migrate frontend css build
+# Local npm cache: keep all npm/npx writes inside the project so builds run
+# under restricted file sandboxes (e.g. dsh workspace-write) without
+# privilege escalation. Existing env vars take precedence (?=).
+NPM_CONFIG_CACHE ?= $(PWD)/frontend/.npm-cache
+export NPM_CONFIG_CACHE
+
+all: db-migrate frontend css
 
 clean:
 	rm -rf target/*
@@ -6,6 +12,7 @@ clean:
 	rm -rf dist/admin/
 	rm -rf frontend/node_modules/
 	rm -rf frontend/.svelte-kit/
+	rm -rf frontend/.npm-cache/
 
 css:
 	npx @tailwindcss/cli -i ./static/css/input.css -o ./dist/css/output.css
@@ -19,15 +26,23 @@ frontend:
 sqlx-setup:
 	cargo install sqlx-cli
 	sqlx database create
-	sqlx migrate run --source db/migrations
+	# `sqlx migrate run` cannot bootstrap a FRESH database (see src/db.rs);
+	# on an existing database it works. For fresh installs use `make db-migrate`.
+	sqlx migrate run --source migrations
 
-db-migrate:
+# Fresh databases cannot be migrated by the sqlx CLI (see src/db.rs): the
+# binary bootstraps the schema itself.
+db-migrate: build
 	export DATABASE_URL=sqlite://data/db.sqlite
 	test -e data/db.sqlite || mkdir -p data && touch data/db.sqlite
-	sqlx migrate run --source migrations
+	JWT_SECRET=$${JWT_SECRET:-local-dev-secret-0123456789-abcdefghijklmnopqrstuvwxyz} \
+	GOOGLE_CLIENT_ID=$${GOOGLE_CLIENT_ID:-local} \
+	GOOGLE_CLIENT_SECRET=$${GOOGLE_CLIENT_SECRET:-local} \
+	HARDWIRE_DB_PATH=data/db.sqlite \
+	./target/release/hardwire --db-init
 	cargo sqlx prepare
 
-build: db-migrate
+build:
 	cargo build -r
 
 VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "dev")

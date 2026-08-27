@@ -25,17 +25,22 @@ jobs:
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features sqlite
 
+      - name: Build
+        run: cargo build --release
+
       - name: Set up database
+        # Fresh databases cannot be bootstrapped by `sqlx migrate run` (see
+        # src/db.rs), so the app binary itself initializes the database.
         run: |
           mkdir -p data
           touch data/db.sqlite
-          DATABASE_URL=sqlite://data/db.sqlite sqlx migrate run --source migrations
+          JWT_SECRET=ci-test-secret-0123456789-abcdefghijklmnopqrstuvwxyz \
+          GOOGLE_CLIENT_ID=ci GOOGLE_CLIENT_SECRET=ci \
+          HARDWIRE_DB_PATH=data/db.sqlite \
+          ./target/release/hardwire --db-init
 
       - name: Check sqlx offline cache
         run: DATABASE_URL=sqlite://data/db.sqlite cargo sqlx prepare --check
-
-      - name: Build
-        run: cargo build --release
 
       - name: Run tests
         run: cargo test --release
