@@ -32,7 +32,10 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          # Username is not a secret (it is public in the image name); the
+          # secret only guards it against typos/renames. The token secret is
+          # mandatory and must hold a Docker Hub access token (dpaq_/dckr_pat_).
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'pestouille' }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
