@@ -15,6 +15,10 @@ jobs:
   build-and-push:
     name: Build & push Docker image
     runs-on: ubuntu-latest
+    # Les secrets DOCKERHUB_* vivent dans l'environment GitHub « Docker Hub »
+    # (Settings → Environments), pas dans les repository secrets : l'environment
+    # doit être déclaré ici pour qu'ils soient injectés dans le job.
+    environment: Docker Hub
     permissions:
       contents: read
       packages: write
