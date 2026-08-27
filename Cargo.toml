@@ -1,6 +1,6 @@
 [package]
 name = "hardwire"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Adrien Pestel"]
 edition = "2024"
 
@@ -8,49 +8,48 @@ edition = "2024"
 
 [dependencies]
 # derive_more = "1.0.0"
-askama = "0.15.4"
-nanoid = "0.4.0"
+askama = "0.16.0"
+nanoid = "0.5"
 log = "0.4.29"
 pretty_env_logger = "0.5.0"
 console-subscriber = "0.5.0"
 
 # oauth2 = { version = "5.0.0", features = ["reqwest"] }
 openidconnect = "4.0.1"
-reqwest = { version = "0.12.24", features = ["json"] }
-jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
+reqwest = { version = "0.13.0", features = ["json"] }
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 
 clap = { version = "4.5.60", features = ["derive"] }
 anyhow = "1.0.102"
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-util = "0.7.18"
-tower-http = { version = "0.6.8", features = ["full"] }
+tower-http = { version = "0.7.0", features = ["full"] }
 axum = { version = "0.8.8", features = ["ws", "tokio"] }
 axum-extra = "0.12.5"
-axum-tracing-opentelemetry = { version = "0.33.0" }
+axum-tracing-opentelemetry = { version = "0.38.0" }
 url = "2.5.8"
 http = "1.4.0"
 tempfile = "3.25.0"
 sevenzip-mt = "0.2.2"
 
 # opentelemetry-http = "0.13.0"
-opentelemetry-otlp = { version = "0.31.0", default-features = true }
+opentelemetry-otlp = { version = "0.32.0", default-features = true }
 
 tracing = "0.1.44"
-tracing-opentelemetry = "0.32.1"
+tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.22", features = [
     "env-filter",
     "fmt",
     "json",
 ] }
 
-init-tracing-opentelemetry = { version = "0.36.0", features = [
+init-tracing-opentelemetry = { version = "0.38.1", features = [
     "tracing_subscriber_ext",
 ] }
 
-tracing-opentelemetry-instrumentation-sdk = "0.32.3"
+tracing-opentelemetry-instrumentation-sdk = "0.38.1"
 
-sha2 = "0.10.9"
-sqlx = { version = "0.8.6", default-features = false, features = [
+sqlx = { version = "0.9.0", default-features = false, features = [
     "sqlite",
     "macros",
     "migrate",
@@ -68,8 +67,5 @@ futures = "0.3.32"
 serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }
 indextree = "4.7.4"
-opentelemetry = { version = "0.31.0" }
+opentelemetry = { version = "0.32.0" }
 thiserror = "2.0.18"
-
-[dev-dependencies]
-mockall = "0.14.0"

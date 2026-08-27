@@ -45,7 +45,7 @@ const BASE_TABLES_DDL: &[&str] = &[
 pub async fn bootstrap_schema(db: &SqlitePool) -> Result<(), SqlxError> {
     // 1) Make the base tables available before the 2025/2026 migrations run.
     for stmt in BASE_TABLES_DDL {
-        sqlx::query(stmt).execute(db).await?;
+        sqlx::query(*stmt).execute(db).await?;
     }
 
     // 2) Record the base-tables migration as applied so the runner skips it
@@ -56,13 +56,17 @@ pub async fn bootstrap_schema(db: &SqlitePool) -> Result<(), SqlxError> {
         .find(|m| m.version == BASE_TABLES_MIGRATION_VERSION)
         .expect("built-in migration 202201011537 must be present");
 
+    // Note: column list mirrors the bookkeeping table that sqlx 0.9 creates
+    // (`checksum BLOB NOT NULL`). On databases created under sqlx 0.8 the table
+    // already exists (with a nullable `checksum`), so this is a no-op there and
+    // the runner keeps working (it always writes a non-null checksum).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             version BIGINT PRIMARY KEY,
             description TEXT NOT NULL,
             installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             success BOOLEAN NOT NULL,
-            checksum BLOB,
+            checksum BLOB NOT NULL,
             execution_time BIGINT NOT NULL
         )",
     )

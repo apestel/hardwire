@@ -9,13 +9,17 @@ use axum::{
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    AuthorizationCode, AsyncHttpClient, ClientId, ClientSecret, CsrfToken, HttpClientError,
+    HttpRequest, HttpResponse, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
+    Scope, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{BytesCodec, FramedRead};
 
 use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Instant;
 
 use crate::{
     App,
@@ -24,6 +28,39 @@ use crate::{
 };
 
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH};
+
+// ─── OIDC HTTP client adapter ────────────────────────────────────────────────
+// `openidconnect 4` (latest) pins its `AsyncHttpClient` integration to
+// `reqwest 0.12`, so a plain `reqwest 0.13::Client` does not satisfy the
+// trait bound. This adapter reproduces the same integration on top of our
+// own `reqwest 0.13` client (mirrors oauth2's `reqwest_client.rs` impl).
+#[derive(Debug, Clone)]
+struct ReqwestOidcClient(reqwest::Client);
+
+impl<'c> AsyncHttpClient<'c> for ReqwestOidcClient {
+    type Error = HttpClientError<reqwest::Error>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<HttpResponse, Self::Error>> + Send + 'c>>;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        Box::pin(async move {
+            let response = self
+                .0
+                .execute(reqwest::Request::try_from(request).map_err(Box::new)?)
+                .await
+                .map_err(Box::new)?;
+
+            let mut builder = http::Response::builder().status(response.status());
+            builder = builder.version(response.version());
+            for (name, value) in response.headers().iter() {
+                builder = builder.header(name, value);
+            }
+            builder
+                .body(response.bytes().await.map_err(Box::new)?.to_vec())
+                .map_err(HttpClientError::Http)
+        })
+    }
+}
 
 // ─── Auth types ─────────────────────────────────────────────────────────────
 
@@ -109,14 +146,45 @@ pub struct AuthCallbackQuery {
     state: String,
 }
 
-/// Returns cached OIDC provider metadata. Discovery is performed once and reused.
+/// OIDC provider metadata, cached for one hour. Discovery used to be a
+/// network round-trip on every login AND every callback; caching both removes
+/// that dependency from the hot path and the associated failure surface.
+static OIDC_METADATA: std::sync::OnceLock<std::sync::Mutex<Option<(CoreProviderMetadata, Instant)>>> =
+    std::sync::OnceLock::new();
+const OIDC_METADATA_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 async fn discover_oidc_metadata() -> Result<CoreProviderMetadata, AppError> {
-    let http_client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e))
-        })?;
+    let cache = OIDC_METADATA.get_or_init(|| std::sync::Mutex::new(None));
+
+    // Fast path: fresh cached metadata.
+    {
+        let guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((metadata, fetched_at)) = guard.as_ref() {
+            if fetched_at.elapsed() < OIDC_METADATA_TTL {
+                return Ok(metadata.clone());
+            }
+        }
+    }
+
+    // Slow path: perform discovery WITHOUT holding the lock — a std::sync
+    // MutexGuard is not Send, so it must not be held across the await (the
+    // handler future must stay Send). Concurrent cold starts may discover in
+    // parallel; last write wins, both results are equally valid.
+    let metadata = fetch_oidc_metadata().await?;
+    *cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some((metadata.clone(), Instant::now()));
+    Ok(metadata)
+}
+
+async fn fetch_oidc_metadata() -> Result<CoreProviderMetadata, AppError> {
+    let http_client = ReqwestOidcClient(
+        reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e))
+            })?,
+    );
     let issuer_url = IssuerUrl::new("https://accounts.google.com".to_string())
         .map_err(|e| AppError::AuthError(AuthErrorKind::OAuthError(e.to_string())))?;
     CoreProviderMetadata::discover_async(issuer_url, &http_client)
@@ -170,10 +238,12 @@ pub async fn google_callback(
     State(app): State<App>,
     Query(query): Query<AuthCallbackQuery>,
 ) -> Result<Redirect, AppError> {
-    let http_client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
+    let http_client = ReqwestOidcClient(
+        reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?,
+    );
 
     let metadata = discover_oidc_metadata().await?;
     let client_id = ClientId::new(app.config.auth.google_client_id.clone());
@@ -724,16 +794,19 @@ pub async fn download_stats_by_period(
         _ => "%Y-%m-%d",
     };
 
-    let records: Vec<(String, i64, i64)> = sqlx::query_as(&format!(
-        "SELECT strftime('{}', datetime(started_at, 'unixepoch')) as date,
+    // `date_format` is bound as a parameter (not interpolated) so the SQL text
+    // stays a static literal — required by sqlx 0.9's dynamic-SQL safety check
+    // and injection-proof by construction.
+    let records: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT strftime(?, datetime(started_at, 'unixepoch')) as date,
                 COUNT(*) as count,
                 COALESCE(SUM(file_size), 0) as size
          FROM download
          GROUP BY date
          ORDER BY date DESC
          LIMIT ?",
-        date_format
-    ))
+    )
+    .bind(date_format)
     .bind(limit)
     .fetch_all(&app.db_pool)
     .await
