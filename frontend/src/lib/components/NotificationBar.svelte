@@ -5,23 +5,35 @@
 	import Notification from './Notification.svelte';
 
 	let ws: WebSocket | null = null;
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let reconnectDelay = 1000;
+	let destroyed = false;
 
 	onMount(() => {
 		connectWs();
 	});
 
 	onDestroy(() => {
+		destroyed = true;
+		if (reconnectTimer) clearTimeout(reconnectTimer);
 		ws?.close();
 	});
 
 	function connectWs() {
+		if (destroyed) return;
 		const token = getToken();
+		// Logged out (or logout happened while a reconnect was pending): stop.
 		if (!token) return;
 
 		const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-		ws = new WebSocket(
-			`${proto}://${location.host}/admin/live_update?token=${encodeURIComponent(token)}`,
-		);
+		// The token is sent as the first message after the socket opens, so it
+		// never appears in the URL / access logs.
+		ws = new WebSocket(`${proto}://${location.host}/admin/live_update`);
+
+		ws.onopen = () => {
+			ws?.send(token);
+			reconnectDelay = 1000;
+		};
 
 		ws.onmessage = (event) => {
 			try {
@@ -38,8 +50,15 @@
 			}
 		};
 
-		ws.onclose = () => {
-			setTimeout(connectWs, 3000);
+		ws.onclose = (event) => {
+			ws = null;
+			if (destroyed) return;
+			// 4401 = rejected by the server (invalid/expired token): retrying
+			// with the same token is pointless. Same if the user logged out.
+			if (event.code === 4401 || !getToken()) return;
+			// Exponential backoff, capped at 30s.
+			reconnectTimer = setTimeout(connectWs, reconnectDelay);
+			reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
 		};
 	}
 </script>

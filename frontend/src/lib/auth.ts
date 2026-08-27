@@ -22,3 +22,20 @@ export function isAuthenticated(): boolean {
 		return false;
 	}
 }
+
+/// Asks the backend whether the stored token is still valid. The client-side
+/// `isAuthenticated` check only looks at the (unverifiable) `exp` claim, so a
+/// forged or revoked token must be caught server-side — this call does that.
+export async function verifyToken(): Promise<boolean> {
+	const token = getToken();
+	if (!token) return false;
+	try {
+		const res = await fetch('/admin/api/users', {
+			headers: { Authorization: `Bearer ${token}` }
+		});
+		return res.ok;
+	} catch {
+		// Network error: don't log the user out on a transient outage.
+		return true;
+	}
+}

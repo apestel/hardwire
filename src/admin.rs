@@ -10,7 +10,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    RedirectUrl, Scope, TokenResponse,
+    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -158,7 +158,10 @@ pub async fn google_login(State(app): State<App>) -> Result<Redirect, AppError> 
     // Purge entries older than 10 minutes to prevent unbounded growth
     pending_auths.retain(|_, (_, _, inserted_at)| now - *inserted_at < 600);
 
-    pending_auths.insert(csrf_token.secret().clone(), (nonce, pkce_verifier, now));
+    // Store the PKCE code verifier as a plain string: the oauth2 type
+    // deliberately does not implement Clone (anti-reuse), which would prevent
+    // re-inserting the pending auth if the token exchange fails transiently.
+    pending_auths.insert(csrf_token.secret().clone(), (nonce, pkce_verifier.into_secret(), now));
 
     Ok(Redirect::to(auth_url.as_str()))
 }
@@ -180,15 +183,16 @@ pub async fn google_callback(
     let client = CoreClient::from_provider_metadata(metadata, client_id, Some(client_secret))
         .set_redirect_uri(redirect_url);
 
-    let (nonce, pkce_verifier, _) = {
+    let (nonce, verifier_secret, inserted_at) = {
         let mut pending_auths = app.pending_auths.lock().await;
         pending_auths
             .remove(&query.state)
             .ok_or_else(|| AppError::AuthError(AuthErrorKind::InvalidToken))?
     };
 
-    let token_response = client
-        .exchange_code(AuthorizationCode::new(query.code))
+    let pkce_verifier = PkceCodeVerifier::new(verifier_secret.clone());
+    let exchange_result = client
+        .exchange_code(AuthorizationCode::new(query.code.clone()))
         .map_err(|e| {
             AppError::AuthError(AuthErrorKind::OAuthError(format!(
                 "Exchange code error: {:?}",
@@ -197,13 +201,24 @@ pub async fn google_callback(
         })?
         .set_pkce_verifier(pkce_verifier)
         .request_async(&http_client)
-        .await
-        .map_err(|e| {
-            AppError::AuthError(AuthErrorKind::OAuthError(format!(
+        .await;
+
+    // On failure, put the pending auth back: if the exchange failed because of
+    // a transient network error the Google code may not be consumed yet and the
+    // callback can be retried with the same state.
+    let token_response = match exchange_result {
+        Ok(response) => response,
+        Err(e) => {
+            app.pending_auths
+                .lock()
+                .await
+                .insert(query.state.clone(), (nonce, verifier_secret, inserted_at));
+            return Err(AppError::AuthError(AuthErrorKind::OAuthError(format!(
                 "Token exchange failed: {:?}",
                 e
-            )))
-        })?;
+            ))));
+        }
+    };
 
     let id_token = token_response
         .id_token()
@@ -275,7 +290,9 @@ pub async fn google_callback(
     };
 
     let jwt_secret = app.config.auth.jwt_secret.as_bytes();
-    let exp = (chrono::Utc::now() + chrono::Duration::days(7)).timestamp() as usize;
+    let exp = (chrono::Utc::now()
+        + chrono::Duration::hours(app.config.auth.jwt_expiry_hours as i64))
+        .timestamp() as usize;
     let jwt_claims = Claims {
         sub: user.id,
         exp,
@@ -419,7 +436,20 @@ pub async fn download_task_output(
         .ok_or_else(|| AppError::TaskError("No archive_path in output".to_string()))?
         .to_owned();
 
-    let file = tokio::fs::File::open(&archive_path)
+    // The archive must live inside the data directory (output_path is validated
+    // in TaskWorker, but the DB row is the source of truth at download time).
+    let archive_abs = app.config.server.data_dir.join(&archive_path);
+    let canonical = tokio::fs::canonicalize(&archive_abs)
+        .await
+        .map_err(AppError::FileSystem)?;
+    if !canonical.starts_with(&app.data_dir_canonical) {
+        tracing::warn!(path = %archive_path, "refusing to stream archive outside the data directory");
+        return Err(AppError::ValidationError(
+            "archive path is outside the data directory".into(),
+        ));
+    }
+
+    let file = tokio::fs::File::open(&canonical)
         .await
         .map_err(AppError::FileSystem)?;
     let file_size = file
@@ -428,11 +458,21 @@ pub async fn download_task_output(
         .map_err(AppError::FileSystem)?
         .len();
 
-    let filename = std::path::Path::new(&archive_path)
+    // Sanitize the filename: only ASCII alphanumerics, dots and underscores are
+    // safe inside a Content-Disposition header (no quote/CR/LF injection).
+    let raw_filename = std::path::Path::new(&canonical)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("archive.7z")
-        .to_owned();
+        .unwrap_or("archive.7z");
+    let sanitized: String = raw_filename
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_')
+        .collect();
+    let filename = if sanitized.is_empty() {
+        "archive.7z".to_string()
+    } else {
+        sanitized
+    };
 
     let stream = FramedRead::new(file, BytesCodec::new());
     let body = Body::from_stream(stream);
@@ -487,6 +527,17 @@ pub async fn create_shared_link(
         return Err(AppError::ValidationError("file_paths must not be empty".into()));
     }
 
+    let max_files = app.config.limits.max_files_per_share;
+    if request.file_paths.len() > max_files {
+        return Err(AppError::TooManyFiles {
+            max_files,
+            actual_files: request.file_paths.len(),
+        });
+    }
+    let max_file_size = app.config.limits.max_file_size_bytes;
+    let data_dir = app.config.server.data_dir.clone();
+    let canonical_data_dir = app.data_dir_canonical.clone();
+
     let now = chrono::Utc::now().timestamp();
     let expires_at = request.expires_at.unwrap_or(now + 86400 * 7);
     let share_id = nanoid::nanoid!(10);
@@ -504,19 +555,49 @@ pub async fn create_shared_link(
     .map_err(AppError::Database)?;
 
     for file_path in &request.file_paths {
-        // file_path from the indexer is relative to data_dir — resolve to absolute
-        let abs_path = app.config.server.data_dir.join(file_path);
-        let path = abs_path.to_string_lossy().to_string();
-
-        let metadata = tokio::fs::metadata(&abs_path)
+        // file_path from the indexer is relative to data_dir — resolve to absolute.
+        // Reject absolute paths and `..` escapes both lexically and after
+        // symlink resolution, so no file outside the data directory is shareable.
+        let normalized = crate::pathtools::normalize_lexical(&data_dir.join(file_path));
+        let base = crate::pathtools::normalize_lexical(&data_dir);
+        if !normalized.starts_with(&base) {
+            return Err(AppError::ValidationError(format!(
+                "path escapes the data directory: {file_path}"
+            )));
+        }
+        let canonical = tokio::fs::canonicalize(&normalized)
             .await
-            .map_err(|_| AppError::FileNotFound(path.clone()))?;
+            .map_err(|_| AppError::FileNotFound(file_path.clone()))?;
+        if !canonical.starts_with(&canonical_data_dir) {
+            tracing::warn!(path = %file_path, "refusing to share a file outside the data directory");
+            return Err(AppError::ValidationError(
+                "path resolves outside the data directory".into(),
+            ));
+        }
+        // The database file is never shareable, even when it is inside data_dir.
+        if canonical == app.db_path_canonical {
+            tracing::warn!(path = %file_path, "refusing to share the database file");
+            return Err(AppError::ValidationError(
+                "sharing the database file is not allowed".into(),
+            ));
+        }
+        let canonical_path = canonical.to_string_lossy().to_string();
+
+        let metadata = tokio::fs::metadata(&canonical)
+            .await
+            .map_err(|_| AppError::FileNotFound(canonical_path.clone()))?;
         let file_size = metadata.len() as i64;
+        if metadata.len() > max_file_size {
+            return Err(AppError::FileSizeLimitExceeded {
+                max_size: max_file_size,
+                actual_size: metadata.len(),
+            });
+        }
 
         let file_id = sqlx::query!(
             "INSERT INTO files (sha256, path, file_size) VALUES (?, ?, ?)",
             "",
-            path,
+            canonical_path,
             file_size
         )
         .execute(&mut *tx)
@@ -737,34 +818,62 @@ pub struct DownloadRecord {
 
 // ─── WebSocket live updates ──────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct WsQuery {
-    token: Option<String>,
-}
-
+/// The JWT is sent as the first message right after the socket opens, so it
+/// never appears in the URL (and therefore not in access logs / proxies).
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(app): State<App>,
-    Query(query): Query<WsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let token = query
-        .token
-        .ok_or_else(|| AppError::AuthError(AuthErrorKind::MissingToken))?;
-
-    let jwt_secret = app.config.auth.jwt_secret.as_bytes();
-    decode::<Claims>(
-        &token,
-        &DecodingKey::from_secret(jwt_secret),
-        &Validation::default(),
-    )
-    .map_err(|_| AppError::AuthError(AuthErrorKind::InvalidToken))?;
-
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, app)))
 }
 
 async fn handle_socket(mut socket: WebSocket, app: App) {
-    use axum::extract::ws::Message;
+    use axum::extract::ws::{CloseFrame, Message};
     use tokio::sync::broadcast::error::RecvError;
+
+    // Authenticate on the first message. 4401 = unauthorized (client must not
+    // retry with the same credentials).
+    let token = match socket.recv().await {
+        Some(Ok(Message::Text(token))) => token.to_string(),
+        Some(Ok(Message::Binary(data))) => String::from_utf8_lossy(&data).into_owned(),
+        _ => return,
+    };
+
+    let jwt_secret = app.config.auth.jwt_secret.as_bytes();
+    let claims = match decode::<Claims>(
+        &token,
+        &DecodingKey::from_secret(jwt_secret),
+        &Validation::default(),
+    ) {
+        Ok(data) => data.claims,
+        Err(_) => {
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 4401,
+                    reason: "unauthorized".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+
+    // Tokens of deleted admins must not open a stream (same check as the HTTP middleware).
+    let user_exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM admin_users WHERE id = ?")
+        .bind(claims.sub)
+        .fetch_optional(&app.db_pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !user_exists {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 4401,
+                reason: "unauthorized".into(),
+            })))
+            .await;
+        return;
+    }
 
     let mut rx = app.progress_channel_sender.subscribe();
 

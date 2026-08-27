@@ -3,8 +3,9 @@
 	import { base } from '$app/paths';
 	import { page, navigating } from '$app/stores';
 	import NotificationBar from '$lib/components/NotificationBar.svelte';
-	import { clearToken } from '$lib/auth';
+	import { clearToken, verifyToken } from '$lib/auth';
 	import { goto } from '$app/navigation';
+	import { onMount } from 'svelte';
 
 	let { children } = $props();
 
@@ -13,6 +14,27 @@
 			$page.url.pathname === base ||
 			$page.url.pathname === `${base}/`,
 	);
+
+	// The client-side auth check trusts the (unverifiable) `exp` claim of the
+	// JWT, so poll the backend: if it rejects the token (revoked, rotated
+	// secret, deleted user), force a logout.
+	onMount(() => {
+		const check = async () => {
+			const pathname = $page.url.pathname;
+			const onAuthRoute =
+				pathname.startsWith(`${base}/auth/`) ||
+				pathname === base ||
+				pathname === `${base}/`;
+			if (onAuthRoute) return;
+			if (!(await verifyToken())) {
+				clearToken();
+				goto(base || '/');
+			}
+		};
+		void check();
+		const timer = setInterval(() => void check(), 60_000);
+		return () => clearInterval(timer);
+	});
 
 	function isActive(path: string): boolean {
 		return $page.url.pathname.startsWith(`${base}${path}`);

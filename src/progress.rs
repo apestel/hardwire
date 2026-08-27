@@ -147,7 +147,17 @@ impl Manager {
                         self.update_download_progress(pm).await;
                     }
                 },
-                Err(err) => tracing::error!("Progress queue receiver have been ended: {}", err),
+                // The channel lagged: some progress events were dropped. Log and
+                // continue — the DB is re-synced on the next event of each
+                // transaction, and completion is computed from offsets, so no
+                // state is silently lost forever.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("progress queue lagged, dropped {n} events");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::error!("progress channel closed, stopping receiver");
+                    break;
+                }
             }
         }
     }
@@ -158,7 +168,7 @@ impl Manager {
         let file_size_i64 = pm.file_size as i64;
 
         // INSERT OR IGNORE: safe to call on every range request — only the first one inserts
-        sqlx::query!(
+        match sqlx::query!(
             "INSERT OR IGNORE INTO download (file_path, ip_address, transaction_id, status, file_size, started_at) VALUES ($1, $2, $3, 'in_progress', $4, $5)",
             pm.file_path,
             pm.ip_address,
@@ -168,13 +178,24 @@ impl Manager {
         )
         .execute(&self.db_pool)
         .await
-        .unwrap();
+        {
+            Ok(_) => {}
+            // Never panic in this background task: a transient DB error must not
+            // kill download tracking for every subsequent event.
+            Err(e) => {
+                tracing::error!(
+                    transaction_id = %pm.transaction_id,
+                    "failed to record download start: {e}"
+                );
+                return;
+            }
+        }
 
         // Completion: this chunk reaches the end of the file
         let chunk_end = pm.start_offset + pm.read_bytes as u64;
         if pm.file_size > 0 && chunk_end >= pm.file_size {
             let status = DownloadStatus::Complete.to_str();
-            sqlx::query!(
+            match sqlx::query!(
                 "UPDATE download SET status = $1, finished_at = $2 WHERE transaction_id = $3",
                 status,
                 now,
@@ -182,7 +203,19 @@ impl Manager {
             )
             .execute(&self.db_pool)
             .await
-            .unwrap();
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(
+                        transaction_id = %pm.transaction_id,
+                        "failed to mark download complete: {e}"
+                    );
+                    // Keep the transaction tracked so the next event can retry
+                    // the completion update.
+                    self.ongoing_download.insert(transaction_id, pm);
+                    return;
+                }
+            }
             self.ongoing_download.remove(&transaction_id);
         } else {
             self.ongoing_download.insert(transaction_id, pm);

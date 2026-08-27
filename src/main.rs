@@ -15,7 +15,7 @@ use tokio_util::codec::{BytesCodec, FramedRead};
 use tower_http::services::ServeDir;
 use tracing::instrument;
 
-use openidconnect::{Nonce, PkceCodeVerifier};
+use openidconnect::Nonce;
 
 use std::collections::HashMap;
 
@@ -32,17 +32,23 @@ use anyhow::{Context, Result, anyhow};
 
 use askama::Template;
 use axum::body::Body;
+use axum::middleware::Next;
+use axum::middleware;
 
 type Db = sqlx::SqlitePool;
 
 use axum::extract::{ConnectInfo, Path, State};
 use axum::routing::{get, head};
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 
 mod admin;
 mod config;
 mod error;
 mod file_indexer;
+mod pathtools;
 mod progress;
 mod worker;
 use config::Config;
@@ -63,6 +69,79 @@ struct Cli {
 
 // AppError is now defined in the error module
 
+/// Per-IP token bucket rate limiter (in-memory; per-process).
+#[derive(Debug, Clone)]
+pub struct RateLimiter {
+    inner: std::sync::Arc<RateLimiterInner>,
+}
+
+#[derive(Debug)]
+struct RateLimiterInner {
+    limit: u32,
+    buckets: StdMutex<HashMap<String, (f64, Instant)>>,
+}
+
+impl RateLimiter {
+    pub fn new(requests_per_minute: u32) -> Self {
+        Self {
+            inner: std::sync::Arc::new(RateLimiterInner {
+                limit: requests_per_minute.max(1),
+                buckets: StdMutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Consume one token for `key`; returns false when the bucket is empty.
+    pub fn allow(&self, key: &str) -> bool {
+        let inner = &self.inner;
+        let mut buckets = match inner.buckets.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Opportunistic cleanup of idle buckets so the map stays bounded.
+        if buckets.len() > 10_000 {
+            let cutoff = Instant::now() - std::time::Duration::from_secs(300);
+            buckets.retain(|_, (_, last)| *last > cutoff);
+        }
+        let now = Instant::now();
+        let limit = inner.limit as f64;
+        let (tokens, last) = buckets.entry(key.to_string()).or_insert((limit, now));
+        let elapsed = now.duration_since(*last).as_secs_f64();
+        *tokens = (*tokens + (limit / 60.0) * elapsed).min(limit);
+        *last = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Rate-limit middleware for public routes. The client key follows the same
+/// priority as the download handlers: CF-Connecting-IP > X-Forwarded-For > peer.
+async fn rate_limit(
+    State(app): State<App>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    req: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    let key = req
+        .headers()
+        .get("CF-Connecting-IP")
+        .or_else(|| req.headers().get("X-Forwarded-For"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_else(|| peer_addr.ip().to_string());
+
+    if !app.rate_limiter.allow(&key) {
+        tracing::warn!(%key, "rate limit exceeded");
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded. Try again later.")
+            .into_response();
+    }
+    next.run(req).await
+}
+
 /// App holds the state of the application
 #[derive(Clone, Debug)]
 struct App {
@@ -71,7 +150,13 @@ struct App {
     task_manager: Arc<TaskManager>,
     indexer: file_indexer::FileIndexer,
     config: Config,
-    pending_auths: Arc<Mutex<HashMap<String, (Nonce, PkceCodeVerifier, i64)>>>,
+    pending_auths: Arc<Mutex<HashMap<String, (Nonce, String, i64)>>>,
+    rate_limiter: Arc<RateLimiter>,
+    /// Canonicalized data directory, used to refuse serving files outside of it.
+    data_dir_canonical: PathBuf,
+    /// Canonicalized database path — the DB file itself is never shareable,
+    /// even when it lives inside the data directory.
+    db_path_canonical: PathBuf,
 }
 
 impl App {
@@ -81,6 +166,9 @@ impl App {
         task_manager: Arc<TaskManager>,
         indexer: file_indexer::FileIndexer,
         config: Config,
+        rate_limiter: Arc<RateLimiter>,
+        data_dir_canonical: PathBuf,
+        db_path_canonical: PathBuf,
     ) -> Self {
         App {
             db_pool: pool,
@@ -89,6 +177,9 @@ impl App {
             indexer,
             config,
             pending_auths: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter,
+            data_dir_canonical,
+            db_path_canonical,
         }
     }
 }
@@ -149,6 +240,7 @@ struct DownloadFilesTemplate {
 }
 
 async fn list_shared_files(State(app_state): State<App>, Path(share_id): Path<String>) -> Response {
+    let share_id_log = share_id.clone();
     let result = async move {
         let shared_links: Vec<(String, i64, String)> = sqlx::query_as(
             r#"SELECT
@@ -163,7 +255,8 @@ JOIN
 JOIN
     files ON share_link_files.file_id = files.id
 WHERE
-    share_links.id = ?;"#,
+    share_links.id = ?
+    AND (share_links.expiration = -1 OR share_links.expiration > strftime('%s','now'));"#,
         )
         .bind(share_id.clone())
         .fetch_all(&app_state.db_pool)
@@ -191,11 +284,11 @@ WHERE
 
     match result {
         Ok(response) => response.into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", e),
-        )
-            .into_response(),
+        Err(e) => {
+            // Public route: never leak internal error details to the client.
+            tracing::error!(share_id = %share_id_log, "list_shared_files failed: {e}");
+            not_found().await.into_response()
+        }
     }
 }
 
@@ -220,6 +313,35 @@ async fn head_file(
         Ok(row) => row.file_path,
         Err(_) => return Err(not_found().await),
     };
+
+    // Expired or unknown shares must behave exactly like missing ones (no oracle).
+    match sqlx::query_scalar::<_, i64>("SELECT expiration FROM share_links WHERE id = ?")
+        .bind(&share_id)
+        .fetch_optional(&app_state.db_pool)
+        .await
+    {
+        Ok(Some(expiration)) if expiration != -1 && expiration < chrono::Utc::now().timestamp() => {
+            return Err(not_found().await)
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(not_found().await),
+        Err(e) => {
+            tracing::error!(share_id = %share_id, "failed to check share expiration: {e}");
+            return Err(not_found().await);
+        }
+    }
+
+    // Defense in depth: never serve a file that resolves outside the data directory.
+    if let Ok(canonical) = tokio::fs::canonicalize(&file_path).await {
+        if !canonical.starts_with(&app_state.data_dir_canonical) {
+            tracing::warn!(path = %file_path, "refusing to serve file outside the data directory");
+            return Err(not_found().await);
+        }
+        if canonical == app_state.db_path_canonical {
+            tracing::warn!(path = %file_path, "refusing to serve the database file");
+            return Err(not_found().await);
+        }
+    }
 
     // Try the in-memory indexer cache before opening the file just for metadata.
     let file_size = if let Some(size) = app_state.indexer.get_file_size(&file_path) {
@@ -268,20 +390,48 @@ async fn download_file(
         Err(_) => return Err(not_found().await),
     };
 
+    // Expired or unknown shares must behave exactly like missing ones (no oracle).
+    match sqlx::query_scalar::<_, i64>("SELECT expiration FROM share_links WHERE id = ?")
+        .bind(&share_id)
+        .fetch_optional(&app_state.db_pool)
+        .await
+    {
+        Ok(Some(expiration)) if expiration != -1 && expiration < chrono::Utc::now().timestamp() => {
+            return Err(not_found().await)
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(not_found().await),
+        Err(e) => {
+            tracing::error!(share_id = %share_id, "failed to check share expiration: {e}");
+            return Err(not_found().await);
+        }
+    }
+
     let mut file = match tokio::fs::File::open(&file_path).await {
         Ok(file) => file,
         Err(_) => return Err(not_found().await),
     };
+    // Defense in depth: never serve a file that resolves outside the data directory.
+    if let Ok(canonical) = tokio::fs::canonicalize(&file_path).await {
+        if !canonical.starts_with(&app_state.data_dir_canonical) {
+            tracing::warn!(path = %file_path, "refusing to serve file outside the data directory");
+            return Err(not_found().await);
+        }
+        if canonical == app_state.db_path_canonical {
+            tracing::warn!(path = %file_path, "refusing to serve the database file");
+            return Err(not_found().await);
+        }
+    }
     // Try the in-memory indexer cache before calling fstat on the open file.
     let file_size = if let Some(size) = app_state.indexer.get_file_size(&file_path) {
         size
     } else {
         match file.metadata().await {
             Ok(m) => m.len(),
-            Err(e) => return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read file metadata: {}", e),
-            ).into_response()),
+            Err(e) => {
+                tracing::error!("failed to read file metadata: {e}");
+                return Err(not_found().await);
+            }
         }
     };
     // Unique ID per download request so each download gets its own tracking entry
@@ -320,11 +470,8 @@ async fn download_file(
     if start > 0 {
         use tokio::io::AsyncSeekExt;
         if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Something went wrong: {}", e),
-            )
-                .into_response());
+            tracing::error!("failed to seek download stream: {e}");
+            return Ok((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error").into_response());
         }
     }
 
@@ -472,21 +619,38 @@ async fn main() -> Result<()> {
             worker.run().await;
         });
 
+        let rate_limiter = Arc::new(RateLimiter::new(
+            config.limits.rate_limit_requests_per_minute,
+        ));
+        let data_dir_canonical = std::fs::canonicalize(&config.server.data_dir)
+            .unwrap_or_else(|_| config.server.data_dir.clone());
+        let db_path_canonical = std::fs::canonicalize(&config.database.path)
+            .unwrap_or_else(|_| config.database.path.clone());
+
         let app_state = App::new(
             db_pool,
             progress_channel_sender,
             task_manager,
             indexer,
             config.clone(),
+            rate_limiter,
+            data_dir_canonical,
+            db_path_canonical,
         );
 
-        let app = axum::Router::new()
+        // Public routes are rate-limited; admin routes are JWT-protected instead.
+        let public_router = axum::Router::new()
             .route("/s/{share_id}", get(list_shared_files))
             .route(
                 "/s/{share_id}/{file_id}",
                 head(head_file).get(download_file),
             )
             .route("/healthcheck", get(healthcheck))
+            .layer(middleware::from_fn_with_state(app_state.clone(), rate_limit))
+            .with_state(app_state.clone());
+
+        let app = axum::Router::new()
+            .merge(public_router)
             .nest_service("/assets", ServeDir::new("dist/"))
             .nest("/admin", admin::admin_router())
             .with_state(app_state)

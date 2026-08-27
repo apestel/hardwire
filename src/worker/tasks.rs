@@ -109,19 +109,17 @@ impl TaskWorker {
                     }
                 });
 
-                // Resolve output_path relative to data_dir if it's not absolute
-                let output_path = if archive_input.output_path.is_absolute() {
-                    archive_input.output_path.clone()
-                } else {
-                    self.data_dir.join(&archive_input.output_path)
-                };
+                // All paths provided by the client are relative to data_dir. Absolute paths
+                // and `..` escapes are rejected (see resolve_data_path); sources are
+                // additionally resolved through symlinks before the containment check.
+                let output_path = self.resolve_data_path(&archive_input.output_path)?;
 
                 let archive_result = if let Some(dir) = archive_input.directory {
-                    let abs_dir = if dir.is_absolute() {
-                        dir
-                    } else {
-                        self.data_dir.join(dir)
-                    };
+                    let abs_dir = self.resolve_data_path(&dir)?;
+                    let abs_dir = tokio::fs::canonicalize(&abs_dir)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("directory not found: {e}"))?;
+                    self.ensure_within_data_dir(&abs_dir)?;
                     create_7z_archive_with_progress(
                         vec![abs_dir],
                         output_path,
@@ -130,10 +128,15 @@ impl TaskWorker {
                     )
                     .await
                 } else if let Some(files) = archive_input.files {
-                    let abs_files: Vec<PathBuf> = files
-                        .into_iter()
-                        .map(|f| if f.is_absolute() { f } else { self.data_dir.join(f) })
-                        .collect();
+                    let mut abs_files: Vec<PathBuf> = Vec::with_capacity(files.len());
+                    for file in files {
+                        let abs = self.resolve_data_path(&file)?;
+                        let canonical = tokio::fs::canonicalize(&abs)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("file not found: {e}"))?;
+                        self.ensure_within_data_dir(&canonical)?;
+                        abs_files.push(canonical);
+                    }
                     create_7z_archive_with_progress(
                         abs_files,
                         output_path,
@@ -177,6 +180,42 @@ impl TaskWorker {
             }
         }
 
+        Ok(())
+    }
+
+    /// Reject absolute paths and resolve a path relative to the data directory.
+    /// The lexical check catches `..` escapes even for paths that do not exist
+    /// yet (e.g. archive output paths).
+    fn resolve_data_path(&self, path: &Path) -> Result<PathBuf> {
+        if path.is_absolute() {
+            return Err(anyhow::anyhow!(
+                "path must be relative to the data directory: {}",
+                path.display()
+            ));
+        }
+        let normalized = crate::pathtools::normalize_lexical(&self.data_dir.join(path));
+        let base = crate::pathtools::normalize_lexical(&self.data_dir);
+        if !normalized.starts_with(&base) {
+            return Err(anyhow::anyhow!(
+                "path escapes the data directory: {}",
+                path.display()
+            ));
+        }
+        Ok(normalized)
+    }
+
+    /// Verify an existing path (symlinks resolved by the caller) stays inside
+    /// the canonical data directory.
+    fn ensure_within_data_dir(&self, canonical_path: &Path) -> Result<()> {
+        let base = self.data_dir.canonicalize().map_err(|e| {
+            anyhow::anyhow!("data directory not accessible: {e}")
+        })?;
+        if !canonical_path.starts_with(&base) {
+            return Err(anyhow::anyhow!(
+                "path escapes the data directory: {}",
+                canonical_path.display()
+            ));
+        }
         Ok(())
     }
 }
