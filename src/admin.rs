@@ -75,7 +75,8 @@ struct Claims {
 pub struct AdminUser {
     pub id: i64,
     pub email: String,
-    pub google_id: String,
+    /// `None` until the pre-authorized admin logs in with Google for the first time.
+    pub google_id: Option<String>,
     pub created_at: i64,
 }
 
@@ -400,9 +401,8 @@ pub async fn create_user(
 ) -> Result<Json<AdminUser>, AppError> {
     let now = chrono::Utc::now().timestamp();
     sqlx::query!(
-        "INSERT INTO admin_users (email, google_id, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO admin_users (email, created_at) VALUES (?, ?)",
         user_create.email,
-        "",
         now
     )
     .execute(&app.db_pool)
@@ -458,6 +458,14 @@ pub async fn create_task(
     State(app): State<App>,
     Json(input): Json<worker::TaskInput>,
 ) -> Result<Json<CreateTaskResponse>, AppError> {
+    // sevenzip-mt cannot encrypt: refuse rather than silently produce a
+    // plaintext archive the caller believes is password-protected.
+    let worker::TaskInput::CreateArchive(archive) = &input;
+    if archive.password.as_deref().is_some_and(|p| !p.is_empty()) {
+        return Err(AppError::ValidationError(
+            "password-protected archives are not supported".into(),
+        ));
+    }
     let task_id = app
         .task_manager
         .create_task(input)

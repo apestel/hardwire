@@ -111,7 +111,7 @@ tests/
 **`files`** — `id`, `info`, `file_size`, `sha256`, `path`
 **`download`** — `id`, `file_path`, `ip_address`, `transaction_id`, `status`, `file_size`, `started_at`, `finished_at`
 **`tasks`** — `id` (UUID), `task_type`, `status` (Pending/Running/Completed/Failed), `input_data` (JSON), `output_data` (JSON, contains `archive_path`), `progress` (0–100), timestamps
-**`admin_users`** — `id`, `email`, `google_id`, `created_at`
+**`admin_users`** — `id`, `email`, `google_id` (NULL until the pre-authorized admin's first Google login), `created_at`. Migration `20250302` (author's account) is recorded as applied without running on fresh DBs (`src/db.rs`); the first admin comes from `HARDWIRE_ADMIN_EMAIL`
 
 ## TaskInput Serialization
 
@@ -146,6 +146,7 @@ tests/
 - `HARDWIRE_DB_MAX_CONNECTIONS` (default: `10`)
 - `HARDWIRE_DB_MIN_CONNECTIONS` (default: `2`)
 - `HARDWIRE_DB_ACQUIRE_TIMEOUT` (default: `30`)
+- `HARDWIRE_ADMIN_EMAIL` — pre-authorized admin inserted at startup (idempotent); required to log in on a fresh install
 - `JWT_EXPIRY_HOURS` (default: `24`)
 - `GOOGLE_REDIRECT_URL` (default: `http://localhost:8080/admin/auth/google/callback`)
 - `HARDWIRE_MAX_FILE_SIZE_MB` (default: `5120`)

@@ -1,7 +1,7 @@
 export interface AdminUser {
 	id: number;
 	email: string;
-	google_id: string;
+	google_id: string | null;
 	created_at: number;
 }
 
@@ -83,7 +83,6 @@ export interface CreateArchiveInput {
 	data: {
 		files?: string[];
 		directory?: string;
-		password?: string;
 		output_path: string;
 	};
 }

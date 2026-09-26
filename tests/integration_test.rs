@@ -69,6 +69,31 @@ async fn test_create_and_retrieve_admin_user() {
 }
 
 #[tokio::test]
+async fn test_fresh_db_has_no_seeded_admin_and_allows_several_pending_admins() {
+    let ctx = TestContext::new()
+        .await
+        .expect("Failed to create test context");
+
+    // Migration 20250302 (author's account) is skipped on fresh databases.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_users")
+        .fetch_one(&ctx.db_pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "fresh install must not ship a hardcoded admin");
+
+    // Pre-authorized admins have no Google ID yet: two of them must coexist.
+    hardwire::db::ensure_admin(&ctx.db_pool, "a@example.com").await.unwrap();
+    hardwire::db::ensure_admin(&ctx.db_pool, "b@example.com").await.unwrap();
+    hardwire::db::ensure_admin(&ctx.db_pool, "a@example.com").await.unwrap(); // idempotent
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_users WHERE google_id IS NULL")
+            .fetch_one(&ctx.db_pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
 async fn test_create_share_link() {
     let ctx = TestContext::new()
         .await

@@ -225,7 +225,7 @@ impl TaskWorker {
 async fn create_7z_archive_with_progress<P: AsRef<Path>>(
     source: Vec<P>,
     output_path: PathBuf,
-    _password: Option<String>,
+    _password: Option<String>, // ponytail: unsupported by sevenzip-mt, rejected in admin::create_task
     progress: ArchiveProgress,
 ) -> Result<PathBuf> {
     // Ensure output path has .7z extension

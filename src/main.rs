@@ -39,7 +39,7 @@ type Db = sqlx::SqlitePool;
 
 use axum::extract::{ConnectInfo, Path, State};
 use axum::routing::{get, head};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
@@ -123,21 +123,47 @@ impl RateLimiter {
     }
 }
 
-/// Rate-limit middleware for public routes. The client key follows the same
-/// priority as the download handlers: CF-Connecting-IP > X-Forwarded-For > peer.
+/// Client IP for rate limiting and download logs.
+///
+/// Forwarding headers are trusted only when the TCP peer is a local proxy
+/// (loopback / private network, e.g. Traefik on the Docker network): a client
+/// reaching the port directly cannot spoof them. Behind the proxy:
+/// CF-Connecting-IP (set by Cloudflare), else the RIGHT-most X-Forwarded-For
+/// entry — the one appended by the proxy; the left-most is client-controlled.
+/// Header values must parse as an IP, which also bounds rate-limiter keys.
+// ponytail: any local peer is trusted; if Traefik is reachable without
+// Cloudflare in front, it must strip CF-Connecting-IP (or add an explicit
+// trusted-proxy list here).
+fn client_ip(headers: &HeaderMap, peer: IpAddr) -> String {
+    let peer = peer.to_canonical();
+    let behind_proxy = match peer {
+        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+    };
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    behind_proxy
+        .then(|| {
+            header("CF-Connecting-IP")
+                .and_then(|v| v.trim().parse::<IpAddr>().ok())
+                .or_else(|| {
+                    header("X-Forwarded-For")
+                        .and_then(|v| v.rsplit(',').next())
+                        .and_then(|v| v.trim().parse::<IpAddr>().ok())
+                })
+        })
+        .flatten()
+        .unwrap_or(peer)
+        .to_string()
+}
+
+/// Rate-limit middleware for public routes, keyed by [`client_ip`].
 async fn rate_limit(
     State(app): State<App>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     req: axum::http::Request<Body>,
     next: Next,
 ) -> Response {
-    let key = req
-        .headers()
-        .get("CF-Connecting-IP")
-        .or_else(|| req.headers().get("X-Forwarded-For"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
-        .unwrap_or_else(|| peer_addr.ip().to_string());
+    let key = client_ip(req.headers(), peer_addr.ip());
 
     if !app.rate_limiter.allow(&key) {
         tracing::warn!(%key, "rate limit exceeded");
@@ -191,7 +217,8 @@ impl App {
 
 impl App {}
 
-async fn init_db(db_config: &config::DatabaseConfig) -> Db {
+async fn init_db(config: &Config) -> Db {
+    let db_config = &config.database;
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&db_config.path)
         .create_if_missing(true)
@@ -220,6 +247,12 @@ async fn init_db(db_config: &config::DatabaseConfig) -> Db {
 
     if let Err(e) = sqlx::migrate!().run(&db).await {
         panic!("Failed to initialize SQLx database: {}", e);
+    }
+
+    if let Some(email) = &config.auth.admin_email {
+        if let Err(e) = db::ensure_admin(&db, email).await {
+            panic!("Failed to pre-authorize admin {email}: {e}");
+        }
     }
     db
 }
@@ -374,18 +407,9 @@ async fn head_file(
         }
     }
 
-    // Try the in-memory indexer cache before opening the file just for metadata.
-    let file_size = if let Some(size) = app_state.indexer.get_file_size(&file_path) {
-        size
-    } else {
-        let file = match tokio::fs::File::open(&file_path).await {
-            Ok(file) => file,
-            Err(_) => return Err(not_found().await),
-        };
-        match file.metadata().await {
-            Ok(m) => m.len(),
-            Err(_) => return Err(not_found().await),
-        }
+    let file_size = match tokio::fs::metadata(&file_path).await {
+        Ok(m) => m.len(),
+        Err(_) => return Err(not_found().await),
     };
 
     let mut headers = HeaderMap::new();
@@ -400,13 +424,7 @@ async fn download_file(
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Priority: CF-Connecting-IP (Cloudflare) > X-Forwarded-For (Traefik) > direct peer
-    let ip_address = headers
-        .get("CF-Connecting-IP")
-        .or_else(|| headers.get("X-Forwarded-For"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
-        .unwrap_or_else(|| peer_addr.ip().to_string());
+    let ip_address = client_ip(&headers, peer_addr.ip());
     let file_path = match sqlx::query!(
         r#"SELECT path as file_path
     FROM files JOIN share_link_files ON share_link_files.file_id=files.id
@@ -453,16 +471,13 @@ async fn download_file(
             return Err(not_found().await);
         }
     }
-    // Try the in-memory indexer cache before calling fstat on the open file.
-    let file_size = if let Some(size) = app_state.indexer.get_file_size(&file_path) {
-        size
-    } else {
-        match file.metadata().await {
-            Ok(m) => m.len(),
-            Err(e) => {
-                tracing::error!("failed to read file metadata: {e}");
-                return Err(not_found().await);
-            }
+    // fstat on the open file: always the real size (an indexer cache could be
+    // minutes stale and produce a wrong Content-Length).
+    let file_size = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(e) => {
+            tracing::error!("failed to read file metadata: {e}");
+            return Err(not_found().await);
         }
     };
     // Unique ID per download request so each download gets its own tracking entry
@@ -618,12 +633,12 @@ async fn main() -> Result<()> {
     // `--db-init`: initialize/migrate the database, then exit. Used by CI and
     // operators on fresh installs.
     if cli.db_init {
-        let _db = init_db(&config.database).await;
+        let _db = init_db(&config).await;
         println!("database ready: {}", config.database.path.display());
         return Ok(());
     }
 
-    let db_pool = init_db(&config.database).await;
+    let db_pool = init_db(&config).await;
 
     if cli.files.is_empty() && !cli.server {
         // let out = std::io::stdout();
@@ -748,4 +763,37 @@ async fn shutdown_signal() {
     }
 
     tracing::warn!("signal received, starting graceful shutdown");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn client_ip_ignores_headers_from_public_peers() {
+        let h = headers(&[("CF-Connecting-IP", "1.1.1.1"), ("X-Forwarded-For", "2.2.2.2")]);
+        assert_eq!(client_ip(&h, "8.8.8.8".parse().unwrap()), "8.8.8.8");
+    }
+
+    #[test]
+    fn client_ip_behind_proxy() {
+        let proxy: IpAddr = "172.18.0.2".parse().unwrap();
+        // Right-most XFF entry is the one the proxy appended.
+        let h = headers(&[("X-Forwarded-For", "6.6.6.6, 9.9.9.9")]);
+        assert_eq!(client_ip(&h, proxy), "9.9.9.9");
+        // Cloudflare header wins.
+        let h = headers(&[("CF-Connecting-IP", "1.1.1.1"), ("X-Forwarded-For", "9.9.9.9")]);
+        assert_eq!(client_ip(&h, proxy), "1.1.1.1");
+        // Garbage falls back to the peer; IPv4-mapped peers count as private.
+        let h = headers(&[("X-Forwarded-For", "not-an-ip")]);
+        assert_eq!(client_ip(&h, "::ffff:10.0.0.1".parse().unwrap()), "10.0.0.1");
+    }
 }

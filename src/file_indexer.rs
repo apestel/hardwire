@@ -1,6 +1,5 @@
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,8 +34,6 @@ struct RescanSignal {
 #[derive(Clone, Debug)]
 pub struct FileIndexer {
     pub files: Arc<Mutex<Option<Vec<FileInfo>>>>,
-    /// Flat map: absolute_path → file_size, rebuilt on every scan.
-    pub path_cache: Arc<Mutex<HashMap<String, u64>>>,
     signal_tx: Sender<RescanSignal>,
 }
 
@@ -48,20 +45,14 @@ impl FileIndexer {
 
         let files: Arc<Mutex<Option<Vec<FileInfo>>>> = Arc::new(Mutex::new(Some(vec![])));
         let files_clone = Arc::clone(&files);
-        let path_cache: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-        let path_cache_clone = Arc::clone(&path_cache);
         let base_path_clone = Arc::clone(&base_path);
 
         thread::spawn(move || {
             let do_scan = |done_tx: Option<oneshot::Sender<()>>| {
                 match rec_scan_dir(&base_path_clone, &base_path_clone) {
                     Ok(dir_structure) => {
-                        let mut cache = HashMap::new();
-                        collect_file_sizes(&dir_structure, &base_path_clone, &mut cache);
                         let mut output = files_clone.lock().unwrap();
                         *output = Some(dir_structure);
-                        let mut pc = path_cache_clone.lock().unwrap();
-                        *pc = cache;
                     }
                     Err(e) => eprintln!("Error scanning directory: {}", e),
                 }
@@ -90,7 +81,6 @@ impl FileIndexer {
 
         FileIndexer {
             files,
-            path_cache,
             signal_tx: rescan_tx,
         }
     }
@@ -103,40 +93,33 @@ impl FileIndexer {
             Err(_) => None,
         }
     }
-
-    /// Look up the cached file size for an absolute path. Returns `None` on cache miss.
-    pub fn get_file_size(&self, abs_path: &str) -> Option<u64> {
-        self.path_cache.lock().ok()?.get(abs_path).copied()
-    }
 }
 
-/// Walk the FileInfo tree and populate `cache` with absolute_path → size for all files.
-fn collect_file_sizes(
-    entries: &[FileInfo],
-    base_path: &Path,
-    cache: &mut HashMap<String, u64>,
-) {
-    for entry in entries {
-        if entry.is_dir {
-            if let Some(children) = &entry.children {
-                collect_file_sizes(children, base_path, cache);
-            }
-        } else if let Some(size) = entry.size {
-            let abs = base_path.join(&entry.full_path).to_string_lossy().into_owned();
-            cache.insert(abs, size);
-        }
-    }
-}
-
+/// Only an unreadable `path` itself is an error (the caller then keeps the
+/// previous listing). A bad entry below it — dangling symlink, permission
+/// denied, unreadable subdirectory — is logged and skipped, so one broken file
+/// no longer freezes the whole listing.
 fn rec_scan_dir(base_path: &Path, path: &Path) -> io::Result<Vec<FileInfo>> {
     let mut files_info = Vec::new();
 
     if path.is_dir() {
         for entry in fs::read_dir(path)? {
-            let entry = entry?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::warn!(dir = %path.display(), "skipping unreadable entry: {e}");
+                    continue;
+                }
+            };
             let path = entry.path();
 
-            let metadata = fs::metadata(&path)?;
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), "skipping entry: {e}");
+                    continue;
+                }
+            };
             let size = if path.is_file() {
                 Some(metadata.len())
             } else {
@@ -166,7 +149,10 @@ fn rec_scan_dir(base_path: &Path, path: &Path) -> io::Result<Vec<FileInfo>> {
                 .into_owned();
 
             let children = if path.is_dir() {
-                Some(rec_scan_dir(base_path, &path)?)
+                Some(rec_scan_dir(base_path, &path).unwrap_or_else(|e| {
+                    tracing::warn!(dir = %path.display(), "cannot list directory: {e}");
+                    vec![]
+                }))
             } else {
                 None
             };
@@ -184,4 +170,21 @@ fn rec_scan_dir(base_path: &Path, path: &Path) -> io::Result<Vec<FileInfo>> {
     }
 
     Ok(files_info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_broken_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("ok.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink("/nonexistent", dir.path().join("dangling")).unwrap();
+
+        let files = rec_scan_dir(dir.path(), dir.path()).unwrap();
+        let names: Vec<_> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["ok.txt"]);
+    }
 }

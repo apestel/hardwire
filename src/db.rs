@@ -19,6 +19,11 @@
 //!    `CREATE TABLE` statements would otherwise collide with the tables
 //!    from step 1. On databases where the migration ran long ago the row
 //!    already exists and this is a no-op.
+//! 3. it records `20250302` (which seeds the author's own Google account as
+//!    admin) as applied too, so fresh installs of the public image never get
+//!    that account. Existing deployments already ran it: no-op there. The
+//!    first admin of a fresh install comes from `HARDWIRE_ADMIN_EMAIL`
+//!    (see [`ensure_admin`]).
 //!
 //! Every other migration still runs for real through the normal runner, so
 //! the migration files remain the single source of truth (no schema
@@ -30,6 +35,9 @@ use sqlx::{Error as SqlxError, SqlitePool};
 /// The badly-versioned base-tables migration (12-digit version sorts after
 /// the 8-digit 2025/2026 ones).
 const BASE_TABLES_MIGRATION_VERSION: i64 = 202201011537;
+
+/// Migration that hardcodes the author's Google account as admin.
+const SEED_ADMIN_MIGRATION_VERSION: i64 = 20250302;
 
 /// Exact table definitions of `202201011537_create-share-tables.sql`, made
 /// idempotent.
@@ -48,14 +56,8 @@ pub async fn bootstrap_schema(db: &SqlitePool) -> Result<(), SqlxError> {
         sqlx::query(*stmt).execute(db).await?;
     }
 
-    // 2) Record the base-tables migration as applied so the runner skips it
-    //    (its non-idempotent DDL would collide with step 1).
-    let migrator = sqlx::migrate!();
-    let base = migrator
-        .iter()
-        .find(|m| m.version == BASE_TABLES_MIGRATION_VERSION)
-        .expect("built-in migration 202201011537 must be present");
-
+    // 2) + 3) Record the base-tables and seed-admin migrations as applied so
+    //    the runner skips them (see module docs).
     // Note: column list mirrors the bookkeeping table that sqlx 0.9 creates
     // (`checksum BLOB NOT NULL`). On databases created under sqlx 0.8 the table
     // already exists (with a nullable `checksum`), so this is a no-op there and
@@ -73,18 +75,36 @@ pub async fn bootstrap_schema(db: &SqlitePool) -> Result<(), SqlxError> {
     .execute(db)
     .await?;
 
+    let migrator = sqlx::migrate!();
     let installed_on = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    sqlx::query(
-        "INSERT OR IGNORE INTO _sqlx_migrations \
-         (version, description, installed_on, success, checksum, execution_time) \
-         VALUES (?, ?, ?, 1, ?, 0)",
-    )
-    .bind(base.version)
-    .bind(base.description.as_ref())
-    .bind(&installed_on)
-    .bind(base.checksum.to_vec())
-    .execute(db)
-    .await?;
+    for version in [BASE_TABLES_MIGRATION_VERSION, SEED_ADMIN_MIGRATION_VERSION] {
+        let migration = migrator
+            .iter()
+            .find(|m| m.version == version)
+            .unwrap_or_else(|| panic!("built-in migration {version} must be present"));
+        sqlx::query(
+            "INSERT OR IGNORE INTO _sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+             VALUES (?, ?, ?, 1, ?, 0)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(&installed_on)
+        .bind(migration.checksum.to_vec())
+        .execute(db)
+        .await?;
+    }
 
+    Ok(())
+}
+
+/// Pre-authorize `email` as admin (idempotent). It becomes a real admin on its
+/// first Google login, which links the Google ID to the row.
+pub async fn ensure_admin(db: &SqlitePool, email: &str) -> Result<(), SqlxError> {
+    sqlx::query("INSERT OR IGNORE INTO admin_users (email, created_at) VALUES (?, ?)")
+        .bind(email)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(db)
+        .await?;
     Ok(())
 }

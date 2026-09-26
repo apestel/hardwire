@@ -64,6 +64,7 @@ pub fn create_test_config(
             google_client_id: "test-client-id".to_string(),
             google_client_secret: "test-client-secret".to_string(),
             google_redirect_url: "http://localhost:8080/admin/auth/google/callback".to_string(),
+            admin_email: None,
         },
         limits: LimitsConfig {
             max_file_size_bytes: 1024 * 1024 * 100, // 100MB for tests

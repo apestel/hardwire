@@ -8,9 +8,9 @@ range), JWT auth middleware, Google-login redirect (PKCE), stats endpoints,
 Environment (all optional, set by e2e/run.sh):
   BASE_URL      default http://localhost:18093
   JWT_SECRET    default e2e-test-secret-0123456789-abcdef-0123456789
-  ADMIN_SUB     admin_users.id of the pre-seeded admin (default 1,
-                created by migration 20250302)
-  ADMIN_EMAIL   default pestouille@gmail.com
+  ADMIN_SUB     admin_users.id of the pre-seeded admin (default 1, the
+                first row on a fresh DB, created from HARDWIRE_ADMIN_EMAIL)
+  ADMIN_EMAIL   default admin@e2e.test (must match HARDWIRE_ADMIN_EMAIL)
   E2E_DATA_DIR  directory the server uses as HARDWIRE_DATA_DIR (only needed
                 to compare the downloaded bytes of the generated test file)
 """
@@ -19,7 +19,7 @@ import base64, hashlib, hmac, json, os, re, socket, sys, time, urllib.request, u
 BASE = os.environ.get("BASE_URL", "http://localhost:18093")
 SECRET = os.environ.get("JWT_SECRET", "e2e-test-secret-0123456789-abcdef-0123456789").encode()
 ADMIN_SUB = int(os.environ.get("ADMIN_SUB", "1"))
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "pestouille@gmail.com")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@e2e.test")
 DATA_DIR = os.environ.get("E2E_DATA_DIR", ".sqlx-test/e2e/data")
 
 HOST, PORT = (BASE.split("//", 1)[1].split("/", 1)[0].split(":") + ["80"])[:2]

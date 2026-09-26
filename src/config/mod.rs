@@ -35,6 +35,8 @@ pub struct AuthConfig {
     pub google_client_id: String,
     pub google_client_secret: String,
     pub google_redirect_url: String,
+    /// Pre-authorized admin email, inserted at startup (first admin of a fresh install).
+    pub admin_email: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -175,12 +177,17 @@ impl AuthConfig {
         let google_redirect_url = env::var("GOOGLE_REDIRECT_URL")
             .unwrap_or_else(|_| "http://localhost:8080/admin/auth/google/callback".to_string());
 
+        let admin_email = env::var("HARDWIRE_ADMIN_EMAIL")
+            .ok()
+            .filter(|e| !e.trim().is_empty());
+
         Ok(AuthConfig {
             jwt_secret,
             jwt_expiry_hours,
             google_client_id,
             google_client_secret,
             google_redirect_url,
+            admin_email,
         })
     }
 }
@@ -260,6 +267,7 @@ mod tests {
                 google_client_id: "test".to_string(),
                 google_client_secret: "test".to_string(),
                 google_redirect_url: "http://localhost".to_string(),
+                admin_email: None,
             },
             limits: LimitsConfig {
                 max_file_size_bytes: 1000,
@@ -297,6 +305,7 @@ mod tests {
                 google_client_id: "test".to_string(),
                 google_client_secret: "test".to_string(),
                 google_redirect_url: "http://localhost".to_string(),
+                admin_email: None,
             },
             limits: LimitsConfig {
                 max_file_size_bytes: 1000,
